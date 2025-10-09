@@ -1,0 +1,12 @@
+apiVersion: backup.techmonkeys.se/v1
+kind: BackupRequest
+metadata:
+  name: home-assistant-once
+  namespace: backup
+spec:
+  sourceNamespace: home-assistant
+  sourcePVC: home-assistant-home-assistant
+  snapshotClass: vsphere-csi-snapclass
+  backupNamespace: backup
+  runInSourceNamespace: true 
+  remotePath: "user@starbase:/mnt/backups/home-assistant"

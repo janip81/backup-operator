@@ -1,0 +1,76 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-operator
+  namespace: backup-operator
+imagePullSecrets:
+  - name: ghcr-creds
+---
+# ==========================================================
+# ClusterRole — allows controller to manage backups, jobs,
+# PVCs, snapshots, and namespace RBAC across the cluster.
+# ==========================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backup-operator
+rules:
+  # Backup CRDs
+  - apiGroups: ["backup.techmonkeys.se"]
+    resources: ["backuprequests","backups","backupschedules","backuprequests/status","backups/status","backupschedules/status"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+
+  # VolumeSnapshots (read/write)
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots","volumesnapshotcontents"]
+    verbs: ["get","list","watch","create","delete","patch"]
+
+  # PVCs, ConfigMaps, Secrets, ServiceAccounts (full CRUD)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims","configmaps","secrets","serviceaccounts"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+
+  # Pods, Pod logs, Jobs (full CRUD)
+  - apiGroups: [""]
+    resources: ["pods","pods/log"]
+    verbs: ["get","list","watch","create","patch","update","delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get","list","watch","create","delete"]
+
+  # Kopf, coordination, events, and namespaces
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get","list","watch"]
+  - apiGroups: [""]
+    resources: ["namespaces","events"]
+    verbs: ["get","list","watch","create","patch","update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get","list","watch","create","update","patch"]
+
+  # RBAC management for creating per-namespace roles
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles","rolebindings"]
+    verbs: ["get","list","watch","create","patch","update"]
+  
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+---
+# ==========================================================
+# ClusterRoleBinding — bind to controller ServiceAccount
+# ==========================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backup-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backup-operator
+subjects:
+  - kind: ServiceAccount
+    name: backup-operator
+    namespace: backup-operator

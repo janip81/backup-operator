@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valheim-backup-script
+  namespace: backup-operator
+data:
+  backup.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "[INFO] ===== Valheim Custom Backup Script ====="
+
+    # --- Configuration ---
+    NAMESPACE="${NAMESPACE:-valheim}"
+    PVC_NAME="${PVC_NAME:-valheim-server-backups}"
+    SNAPSHOT_CLASS="${SNAPSHOT_CLASS:-vsphere-csi-snapclass}"
+    STORAGE_CLASS="${STORAGE_CLASS:-vsphere-csi}"
+    REMOTE_PATH="${REMOTE_PATH:-backup@starbase:/mnt/storage/backups/valheim}"
+    TEMP_NAMESPACE="${TEMP_NAMESPACE:-backup}"
+    SNAP_NAME="${PVC_NAME}-snap-$(date +%Y%m%d-%H%M%S)"
+    TMP_PVC="${PVC_NAME}-restore"
+    TMP_MOUNT="/mnt/source"
+
+    echo "[INFO] Using PVC=$PVC_NAME, SnapshotClass=$SNAPSHOT_CLASS, Remote=$REMOTE_PATH"
+
+    # --- Create snapshot ---
+    cat <<EOF | kubectl apply -f -
+    apiVersion: snapshot.storage.k8s.io/v1
+    kind: VolumeSnapshot
+    metadata:
+      name: ${SNAP_NAME}
+      namespace: ${TEMP_NAMESPACE}
+    spec:
+      source:
+        persistentVolumeClaimName: ${PVC_NAME}
+      volumeSnapshotClassName: ${SNAPSHOT_CLASS}
+    EOF
+
+    echo "[INFO] Waiting for snapshot to be ready..."
+    for i in {1..60}; do
+      ready=$(kubectl -n "$TEMP_NAMESPACE" get volumesnapshot "$SNAP_NAME" -o jsonpath='{.status.readyToUse}' 2>/dev/null || echo "false")
+      [[ "$ready" == "true" ]] && break
+      sleep 5
+    done
+
+    if [[ "$ready" != "true" ]]; then
+      echo "❌ Snapshot did not become ready."
+      exit 1
+    fi
+    echo "✅ Snapshot ready."
+
+    # --- Create temporary PVC from snapshot ---
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: ${TMP_PVC}
+      namespace: ${TEMP_NAMESPACE}
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: ${STORAGE_CLASS}
+      resources:
+        requests:
+          storage: 10Gi
+      dataSource:
+        name: ${SNAP_NAME}
+        kind: VolumeSnapshot
+        apiGroup: snapshot.storage.k8s.io
+    EOF
+
+    echo "[INFO] Waiting for temporary PVC..."
+    kubectl -n "$TEMP_NAMESPACE" wait --for=condition=Bound pvc "$TMP_PVC" --timeout=180s
+
+    # --- Mount and copy ---
+    echo "[INFO] Launching temporary pod for rsync..."
+    kubectl -n "$TEMP_NAMESPACE" run backup-transfer --image=alpine:3.19 -i --rm --restart=Never \
+      --overrides "$(cat <<EOP
+    {
+      "spec": {
+        "containers": [{
+          "name": "rsync",
+          "image": "alpine:3.19",
+          "command": ["/bin/sh", "-c"],
+          "args": [
+            "apk add --no-cache openssh rsync && \
+             mkdir -p /mnt/source && \
+             echo '[INFO] Starting rsync...' && \
+             rsync -avz -e 'ssh -o StrictHostKeyChecking=no' /mnt/source/home/steam/backups/ ${REMOTE_PATH} && \
+             echo '[INFO] Done rsync.'"
+          ],
+          "volumeMounts": [{
+            "name": "data",
+            "mountPath": "/mnt/source"
+          }]
+        }],
+        "volumes": [{
+          "name": "data",
+          "persistentVolumeClaim": { "claimName": "${TMP_PVC}" }
+        }]
+      }
+    }
+    EOP
+    )"
+
+    # --- Cleanup ---
+    echo "[INFO] Cleaning up temporary PVC and snapshot..."
+    kubectl -n "$TEMP_NAMESPACE" delete pvc "$TMP_PVC" --ignore-not-found
+    kubectl -n "$TEMP_NAMESPACE" delete volumesnapshot "$SNAP_NAME" --ignore-not-found
+
+    echo "✅ Backup complete and uploaded to ${REMOTE_PATH}"

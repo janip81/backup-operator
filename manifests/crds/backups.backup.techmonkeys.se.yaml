@@ -1,0 +1,103 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backups.backup.techmonkeys.se
+spec:
+  group: backup.techmonkeys.se
+  names:
+    kind: Backup
+    listKind: BackupList
+    plural: backups
+    singular: backup
+    shortNames:
+      - bck
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Backup represents a completed or attempted backup job.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Desired state of the Backup.
+              properties:
+                requestRef:
+                  type: object
+                  description: Reference to the BackupRequest that triggered this Backup.
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                targetNamespace:
+                  type: string
+                  description: Namespace where the source PVC and snapshot exist.
+                method:
+                  type: string
+                  description: Backup transfer method (e.g. rsync, s3, nfs).
+                customScript:
+                  type: object
+                  description: Optional custom backup script or preset used.
+                  properties:
+                    preset:
+                      type: string
+                    key:
+                      type: string
+            status:
+              type: object
+              description: Observed state of the Backup job.
+              properties:
+                phase:
+                  type: string
+                  description: Current phase of the backup (e.g. Succeeded, Failed).
+                reason:
+                  type: string
+                  description: Reason for failure or status change.
+                message:
+                  type: string
+                  description: Human-readable status message.
+                snapshotName:
+                  type: string
+                  description: Name of the created VolumeSnapshot.
+                remotePath:
+                  type: string
+                  description: Remote backup destination path.
+                size:
+                  type: string
+                  description: Requested storage size of the source PVC.
+                startTime:
+                  type: string
+                  format: date-time
+                  description: UTC timestamp when the backup started.
+                completedAt:
+                  type: string
+                  format: date-time
+                  description: UTC timestamp when the backup finished.
+                duration:
+                  type: string
+                  description: Human-readable total runtime of the backup job.
+                logTail:
+                  type: string
+                  description: Tail of worker job logs (rsync summary or script output).
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Duration
+          type: string
+          jsonPath: .status.duration
+        - name: CompletedAt
+          type: date
+          jsonPath: .status.completedAt

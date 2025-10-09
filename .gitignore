@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# System
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Docker
+*.tar
+*.img
+*.pid
+
+# K8s / Helm
+charts/.tgz
+manifests/tmp/
+
+# Local cluster configs
+.kube/
+*.kubeconfig
+
+# Just ignored
+00ignored/*
+
+
+manifests/prod-k8s-ssh-key.yaml
+manifests/prod-k8s-ghcr-creds.yaml
+manifests/hass-backup.yaml
+

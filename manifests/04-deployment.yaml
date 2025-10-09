@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backup-operator
+  namespace: backup-operator
+  labels:
+    app: backup-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backup-operator
+  template:
+    metadata:
+      labels:
+        app: backup-operator
+    spec:
+      serviceAccountName: backup-operator
+      containers:
+        - name: controller
+          image: ghcr.io/janip81/backup-operator-controller:latest
+          imagePullPolicy: Always
+          env:
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: WORKER_IMAGE
+              value: ghcr.io/janip81/backup-operator-worker:latest
+            - name: SERVICE_ACCOUNT
+              value: backup-runner
+            - name: IMAGE_PULL_SECRET
+              value: ghcr-creds
+            - name: DEFAULT_STORAGE_CLASS
+              value: vsphere-csi
+            - name: MOUNT_PATH
+              value: /mnt/source
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP

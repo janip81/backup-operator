@@ -1,0 +1,36 @@
+# Ignore version control
+.git
+.gitignore
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Mac / Windows junk
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.log
+*.tmp
+*.bak
+
+# Ignore Dockerfile build outputs
+*.egg-info/
+dist/
+build/
+
+# Exclude test data or local configs
+tests/
+tmp/
+local/

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-worker-scripts
+  namespace: backup
+data:
+  worker.sh: |
+    #!/usr/bin/env bash
+    echo "This file will be overridden by the image. Kept for live debugging."

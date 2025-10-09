@@ -1,0 +1,83 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backuprequests.backup.techmonkeys.se
+spec:
+  group: backup.techmonkeys.se
+  names:
+    kind: BackupRequest
+    plural: backuprequests
+    singular: backuprequest
+    shortNames:
+      - bkr
+      - bkre
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: "BackupRequest triggers creation of a VolumeSnapshot and backup Job for a PVC."
+          properties:
+            spec:
+              type: object
+              required:
+                - sourceNamespace
+                - sourcePVC
+                - snapshotClass
+                - storageClass
+                - remotePath
+              properties:
+                sourceNamespace:
+                  type: string
+                  description: "Namespace where the original PVC exists (the one being backed up)."
+                sourcePVC:
+                  type: string
+                  description: "Name of the source PVC to back up."
+                snapshotClass:
+                  type: string
+                  description: "Name of the VolumeSnapshotClass used to take the snapshot."
+                storageClass:
+                  type: string
+                  description: "Name of the StorageClass to use for the restore PVC."
+                backupNamespace:
+                  type: string
+                  description: "Optional: Namespace where backup resources (PVC, Job) will run. Defaults to 'backup'."
+                runInSourceNamespace:
+                  type: boolean
+                  default: false
+                  description: "If true, run backup job and restore PVC in the same namespace as the source (avoids cross-namespace snapshot issues)."
+                remotePath:
+                  type: string
+                  description: "Remote destination path (e.g. 'user@host:/path') where backup data is copied via rsync or SSH."
+                sourcePath:
+                  type: string
+                  description: "Optional. Subdirectory inside the PVC to back up, e.g. /config/backups"
+                retention:
+                  type: integer
+                  description: "Optional: number of old snapshots to retain (future use)."
+                transferMethod: 
+                  type: string
+                  description: "Transfer method to use for backup (default: rsync, can be: rsync | scp | sftp)."
+
+            status:
+              type: object
+              description: "Backup status information."
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the backup (Pending, Running, Succeeded, Failed)."
+                snapshot:
+                  type: string
+                  description: "Name of the created VolumeSnapshot."
+                restorePVC:
+                  type: string
+                  description: "Name of the restore PVC created from the snapshot."
+                jobName:
+                  type: string
+                  description: "Name of the backup Job created."
+                message:
+                  type: string
+                  description: "Additional details or error message, if any."
