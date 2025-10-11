@@ -1,376 +1,92 @@
-#!/usr/bin/env python3
-import kopf
-import subprocess
-import json
-import time
-import yaml
-import os
-import sys
-import builtins
-from datetime import datetime
-import random
-import string
-
-# -------------------------------------------------------------------
-# LOGGING HELPERS
-# -------------------------------------------------------------------
-def log(*args, **kwargs):
-    builtins.print(*args, **kwargs, flush=True)
-print = log
-
-# -------------------------------------------------------------------
-# CONFIG (with sane defaults)
-# -------------------------------------------------------------------
-WORKER_IMAGE       = os.getenv("WORKER_IMAGE", "ghcr.io/janip81/backup-operator-worker:latest")
-SERVICE_ACCOUNT    = os.getenv("SERVICE_ACCOUNT", "backup-runner")
-IMAGE_PULL_SECRET  = os.getenv("IMAGE_PULL_SECRET", "ghcr-creds")
-DEFAULT_STORAGE    = os.getenv("DEFAULT_STORAGE_CLASS", "vsphere-csi")
-MOUNT_PATH         = os.getenv("MOUNT_PATH", "/mnt/source")
-OPERATOR_NAMESPACE = os.getenv("OPERATOR_NAMESPACE", "backup-operator")
-
-# -------------------------------------------------------------------
-# UTILS
-# -------------------------------------------------------------------
-def run(cmd, input=None, capture=True, check=True):
-    if cmd and cmd[0] == "kubectl":
-        print("[CMD]", " ".join(cmd))
-    try:
-        result = subprocess.run(cmd, text=True, input=input,
-                                capture_output=capture, check=check)
-        if capture:
-            if result.stdout.strip():
-                print(result.stdout.strip())
-            if result.stderr.strip():
-                print(result.stderr.strip(), file=sys.stderr)
-            return result.stdout.strip()
-        return ""
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Command failed: {' '.join(cmd)}")
-        if e.stdout:
-            print("[STDOUT]", e.stdout.strip())
-        if e.stderr:
-            print("[STDERR]", e.stderr.strip(), file=sys.stderr)
-        raise
-
-def rand_suffix(n=5):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
-
-def wait_for_snapshot(ns, name, timeout=600):
-    print(f"[INFO] Waiting for snapshot {ns}/{name}...")
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            out = run(["kubectl", "-n", ns, "get", "volumesnapshot", name, "-o", "json"])
-            if json.loads(out).get("status", {}).get("readyToUse"):
-                print(f"[INFO] Snapshot {name} ready.")
-                return True
-        except Exception as e:
-            print(f"[WARN] Snapshot check failed: {e}")
-        time.sleep(5)
-    raise TimeoutError(f"Snapshot {name} not ready after {timeout}s")
-
-def wait_for_pvc_bound(ns, name, timeout=300):
-    print(f"[INFO] Waiting for PVC {ns}/{name} to Bind...")
-    start = time.time()
-    while time.time() - start < timeout:
-        out = run(["kubectl", "-n", ns, "get", "pvc", name, "-o", "json"])
-        phase = json.loads(out).get("status", {}).get("phase")
-        if phase == "Bound":
-            print(f"[INFO] PVC {name} bound.")
-            return True
-        time.sleep(3)
-    raise TimeoutError(f"PVC {name} not bound after {timeout}s")
-
-def wait_for_job(ns, name, timeout=7200):
-    print(f"[INFO] Waiting for Job {ns}/{name} to finish...")
-    start = time.time()
-    while time.time() - start < timeout:
-        out = run(["kubectl", "-n", ns, "get", "job", name, "-o", "json"])
-        job = json.loads(out)
-        for c in job.get("status", {}).get("conditions", []):
-            if c.get("type") == "Complete" and c.get("status") == "True":
-                print(f"[INFO] Job {name} succeeded.")
-                return "Succeeded"
-            if c.get("type") == "Failed" and c.get("status") == "True":
-                print(f"[ERROR] Job {name} failed.")
-                return "Failed"
-        time.sleep(5)
-    raise TimeoutError(f"Job {name} timeout after {timeout}s")
-
-def get_pvc_size(ns, pvc):
-    out = run(["kubectl", "-n", ns, "get", "pvc", pvc, "-o", "json"])
-    return json.loads(out)["spec"]["resources"]["requests"]["storage"]
-
-def ensure_rbac(ns):
-    """Tight RBAC for worker job only."""
-    manifest = f"""
-apiVersion: v1
-kind: ServiceAccount
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
 metadata:
-  name: {SERVICE_ACCOUNT}
-  namespace: {ns}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {SERVICE_ACCOUNT}-role
-  namespace: {ns}
-rules:
-  - apiGroups: [""]
-    resources: ["pods","pods/log","persistentvolumeclaims","configmaps","secrets"]
-    verbs: ["get","list","watch","create","patch","update","delete"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["get","list","create","delete","watch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshots"]
-    verbs: ["get","list","create","delete","watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {SERVICE_ACCOUNT}-binding
-  namespace: {ns}
-subjects:
-- kind: ServiceAccount
-  name: {SERVICE_ACCOUNT}
-  namespace: {ns}
-roleRef:
-  kind: Role
-  name: {SERVICE_ACCOUNT}-role
-  apiGroup: rbac.authorization.k8s.io
-"""
-    run(["kubectl", "apply", "-f", "-"], input=manifest)
-    print(f"[INFO] RBAC ensured in {ns}")
-
-def copy_secret(name, src_ns, dst_ns):
-    try:
-        src_yaml = run(["kubectl", "-n", src_ns, "get", "secret", name, "-o", "yaml"])
-        data = yaml.safe_load(src_yaml)
-        data["metadata"]["namespace"] = dst_ns
-        for f in ["resourceVersion","uid","creationTimestamp","managedFields"]:
-            data["metadata"].pop(f, None)
-        run(["kubectl", "apply", "-f", "-"], input=yaml.safe_dump(data, sort_keys=False))
-        print(f"[INFO] Secret {name} copied {src_ns} → {dst_ns}")
-    except subprocess.CalledProcessError:
-        print(f"[WARN] Secret {name} not found in {src_ns}")
-
-def copy_configmap(cm, key, src_ns, dst_ns):
-    src_yaml = run(["kubectl", "-n", src_ns, "get", "configmap", cm, "-o", "yaml"])
-    data = yaml.safe_load(src_yaml)
-    data["metadata"]["namespace"] = dst_ns
-    data["metadata"]["name"] = cm
-    for f in ["resourceVersion","uid","creationTimestamp","managedFields"]:
-        data["metadata"].pop(f, None)
-    run(["kubectl", "apply", "-f", "-"], input=yaml.safe_dump(data, sort_keys=False))
-    print(f"[INFO] ConfigMap {cm}:{key} copied {src_ns} → {dst_ns}")
-    return cm
-
-def cleanup(ns, *resources):
-    for r in resources:
-        run(["kubectl", "-n", ns, "delete", r, "--ignore-not-found=true"])
-
-# -------------------------------------------------------------------
-# KOPF HANDLERS
-# -------------------------------------------------------------------
-@kopf.on.startup()
-def startup(logger, **_):
-    logger.info("[DEBUG] Kopf startup complete; watching BackupRequest events.")
-
-@kopf.on.event("backup.techmonkeys.se", "v1", "backuprequests")
-def debug_event(event, **_):
-    print(f"[DEBUG] Event {event['type']} for {event['object']['metadata']['name']}")
-
-@kopf.on.create("backup.techmonkeys.se", "v1", "backuprequests")
-@kopf.on.resume("backup.techmonkeys.se", "v1", "backuprequests")
-def handle_backup(spec, name, namespace, **_):
-    print(f"\n[INFO] === Handling BackupRequest {namespace}/{name} ===")
-
-    src_ns         = spec["sourceNamespace"]
-    src_pvc        = spec["sourcePVC"]
-    snapshot_class = spec["snapshotClass"]
-    storage_class  = spec.get("storageClass", DEFAULT_STORAGE)
-    remote_path    = spec["remotePath"]
-    method         = spec.get("transferMethod", "rsync").lower()
-    source_path    = spec.get("sourcePath", "/mnt/source/backups")
-    custom_script  = spec.get("customScript", {"preset": "rsync-snapshot-default-backup-script", "key": "backup.sh"})
-
-    app = name
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    suffix = rand_suffix()
-
-    snapshot = f"{app}-snap-{ts}-{suffix}"
-    pvc_restore = f"{app}-restore-{ts}-{suffix}"
-    job = f"backup-{app}-{ts}-{suffix}"
-
-    print(f"[INFO] Snapshot={snapshot}, RestorePVC={pvc_restore}, Job={job}")
-
-    # RBAC & Secrets
-    ensure_rbac(src_ns)
-    copy_secret(IMAGE_PULL_SECRET, OPERATOR_NAMESPACE, src_ns)
-    copy_secret("backup-ssh-key", OPERATOR_NAMESPACE, src_ns)
-
-    # Snapshot
-    run(["kubectl", "-n", src_ns, "apply", "-f", "-"], input=f"""
-apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshot
-metadata:
-  name: {snapshot}
+  name: backupschedules.backup.techmonkeys.se
 spec:
-  volumeSnapshotClassName: {snapshot_class}
-  source:
-    persistentVolumeClaimName: {src_pvc}
-""")
-    wait_for_snapshot(src_ns, snapshot)
-
-    # PVC restore
-    size = get_pvc_size(src_ns, src_pvc)
-    print(f"[INFO] Creating restore PVC {pvc_restore} (no wait for binding)")
-    run(["kubectl", "-n", src_ns, "apply", "-f", "-"], input=f"""
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {pvc_restore}
-spec:
-  storageClassName: {storage_class}
-  dataSource:
-    name: {snapshot}
-    kind: VolumeSnapshot
-    apiGroup: snapshot.storage.k8s.io
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: {size}
-""")
-
-    try:
-        sc_mode = run(["kubectl", "get", "storageclass", storage_class, "-o", "jsonpath={.volumeBindingMode}"])
-        if sc_mode.strip() == "Immediate":
-            print(f"[INFO] StorageClass '{storage_class}' uses Immediate binding; waiting for PVC to bind...")
-            wait_for_pvc_bound(src_ns, pvc_restore)
-        else:
-            print(f"[INFO] StorageClass '{storage_class}' uses WaitForFirstConsumer; skipping PVC wait.")
-    except Exception as e:
-        print(f"[WARN] Could not detect volumeBindingMode: {e}")
-
-    # ConfigMap
-    cm = custom_script.get("preset") or "rsync-snapshot-default-backup-script"
-    key = custom_script.get("key", "backup.sh")
-    copy_configmap(cm, key, OPERATOR_NAMESPACE, src_ns)
-
-    # Worker Job
-    run(["kubectl", "-n", src_ns, "apply", "-f", "-"], input=f"""
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {job}
-  labels: {{app: backup-worker}}
-spec:
-  ttlSecondsAfterFinished: 600
-  template:
-    metadata:
-      labels: {{app: backup-worker}}
-    spec:
-      serviceAccountName: {SERVICE_ACCOUNT}
-      restartPolicy: Never
-      imagePullSecrets:
-      - name: {IMAGE_PULL_SECRET}
-      containers:
-      - name: worker
-        image: {WORKER_IMAGE}
-        imagePullPolicy: Always
-        securityContext:
-          runAsUser: 0
-          runAsGroup: 0
-        command: ["/bin/bash", "-lc"]
-        args: ["cp /opt/custom/{key} /tmp/{key} && chmod +x /tmp/{key} && /tmp/{key}"]
-        env:
-        - name: NAMESPACE
-          value: "{src_ns}"
-        - name: PVC_NAME
-          value: "{src_pvc}"
-        - name: SNAPSHOT_CLASS
-          value: "{snapshot_class}"
-        - name: STORAGE_CLASS
-          value: "{storage_class}"
-        - name: REMOTE_PATH
-          value: "{remote_path}"
-        - name: SOURCE_PATH
-          value: "{source_path}"
-        - name: TEMP_NAMESPACE
-          value: "{namespace}"
-        volumeMounts:
-        - name: src
-          mountPath: {MOUNT_PATH}
-        - name: custom
-          mountPath: /opt/custom
-        - name: ssh
-          mountPath: /tmp/ssh_key
-          subPath: ssh_key
-      volumes:
-      - name: src
-        persistentVolumeClaim:
-          claimName: {pvc_restore}
-      - name: custom
-        configMap:
-          name: {cm}
-          items: [{{key: {key}, path: {key}}}]
-      - name: ssh
-        secret:
-          secretName: backup-ssh-key
-          items:
-            - key: ssh_key
-              path: ssh_key
-              mode: 0644
-""")
-
-    result = wait_for_job(src_ns, job)
-
-    # --- CLEANUP SECTION ---
-    cleanup(src_ns,
-            f"job/{job}",
-            f"pvc/{pvc_restore}",
-            f"volumesnapshot/{snapshot}",
-            f"configmap/{cm}",
-            "secret/backup-ssh-key")
-
-    # --- CREATE BACKUP RECORD ---
-    completed_at = datetime.utcnow().isoformat() + "Z"
-    backup_name = f"{app}-{ts}-{suffix}"
-
-    backup_manifest = f"""
-apiVersion: backup.techmonkeys.se/v1
-kind: Backup
-metadata:
-  name: {backup_name}
-  namespace: {src_ns}
-spec:
-  requestRef:
-    name: {name}
-    namespace: {namespace}
-  targetNamespace: {src_ns}
-  method: {method}
-  customScript:
-    preset: {cm}
-status:
-  phase: {result}
-  message: "Backup completed via operator"
-  snapshotName: {snapshot}
-  remotePath: {remote_path}
-  completedAt: {completed_at}
-  size: {get_pvc_size(src_ns, src_pvc)}
-"""
-    try:
-        run(["kubectl", "apply", "-f", "-"], input=backup_manifest)
-        print(f"[INFO] Backup record created: {backup_name}")
-    except Exception as e:
-        print(f"[WARN] Failed to create Backup CR: {e}")
-
-    # --- DELETE ORIGINAL REQUEST ---
-    try:
-        run(["kubectl", "-n", namespace, "delete", f"backuprequest/{name}", "--ignore-not-found=true"])
-        print(f"[INFO] BackupRequest {name} deleted after success.")
-    except Exception as e:
-        print(f"[WARN] Could not delete BackupRequest {name}: {e}")
-
-    print(f"[DONE] ✅ Backup completed for {app} ({result})")
+  group: backup.techmonkeys.se
+  names:
+    kind: BackupSchedule
+    listKind: BackupScheduleList
+    plural: backupschedules
+    singular: backupschedule
+    shortNames:
+      - bks
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: BackupSchedule spawns BackupRequests on a cron schedule.
+          properties:
+            spec:
+              type: object
+              required:
+                - targetNamespace
+                - schedule
+              properties:
+                targetNamespace:
+                  type: string
+                  description: Namespace where backups will run.
+                schedule:
+                  type: string
+                  description: Cron expression for scheduling backups.
+                snapshotClass:
+                  type: string
+                storageClass:
+                  type: string
+                sourcePVC:
+                  type: string
+                remotePath:
+                  type: string
+                transferMethod:
+                  type: string
+                  description: rsync | scp | sftp
+                retention:
+                  type: integer
+                  description: Number of backups to retain.
+                customScript:
+                  type: object
+                  description: Optional custom script or preset for backups.
+                  properties:
+                    preset:
+                      type: string
+                    key:
+                      type: string
+                      default: backup.sh
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+            status:
+              type: object
+              description: Current observed state of the schedule.
+              properties:
+                phase:
+                  type: string
+                  description: Current status phase of the schedule (e.g., Active, Failed).
+                lastRequest:
+                  type: string
+                  description: Name of the last BackupRequest triggered.
+                lastRunTime:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last backup run.
+                nextRunTime:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the next scheduled run.
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: LastRun
+          type: date
+          jsonPath: .status.lastRunTime
+        - name: NextRun
+          type: date
+          jsonPath: .status.nextRunTime
