@@ -50,3 +50,4 @@ manifests/prod-k8s-ssh-key.yaml
 manifests/prod-k8s-ghcr-creds.yaml
 manifests/hass-backup.yaml
 
+RELEASE_GUIDE.md
