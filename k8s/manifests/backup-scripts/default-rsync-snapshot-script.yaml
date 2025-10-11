@@ -11,19 +11,18 @@ data:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    echo "[INFO] ===== Rsync Transfer Backup Script (v0.5) ====="
+    echo "[INFO] ===== Rsync Transfer Backup Script (v0.6) ====="
 
     # ============================================
     # Environment & path preparation
     # ============================================
     MOUNT_PATH="${MOUNT_PATH:-/mnt/source}"
-    SRC_PATH="${SOURCE_PATH:-}"   # <-- Empty by default
+    SRC_PATH="${SOURCE_PATH:-}"   # optional relative or absolute
     DST_PATH="${REMOTE_PATH:?must be set}"
 
     # If SRC_PATH is empty → use the root mount
     if [[ -z "$SRC_PATH" ]]; then
       SRC_DIR="${MOUNT_PATH}"
-    # If relative (doesn’t start with /) → prepend /mnt/source/
     elif [[ "$SRC_PATH" != /* ]]; then
       SRC_DIR="${MOUNT_PATH%/}/${SRC_PATH#/}"
     else
@@ -37,19 +36,30 @@ data:
     # Ensure source exists
     # ============================================
     if [[ ! -d "$SRC_DIR" ]]; then
-      echo "[WARN] Source directory '$SRC_DIR' not found, creating empty dir."
-      mkdir -p "$SRC_DIR"
+      echo "[ERROR] Source directory '$SRC_DIR' not found in mounted snapshot."
+      echo "[HINT] Verify the correct PVC or subpath (e.g. backups/) exists."
+      exit 1
     fi
 
     echo "[INFO] Listing files to sync:"
     ls -lah "$SRC_DIR" || true
 
     # ============================================
-    # Rsync transfer
+    # Rsync transfer (safe mode: copy only)
     # ============================================
-    echo "[INFO] Starting rsync..."
-    rsync -avz --delete \
+    echo "[INFO] Starting rsync (no deletions, system dirs excluded)..."
+    rsync -avz \
+      --exclude='lost+found/' \
+      --exclude='.Trash*' \
+      --exclude='.cache/' \
       -e "ssh -i /tmp/ssh_key -o StrictHostKeyChecking=no" \
       "${SRC_DIR}/" "${DST_PATH}/"
 
-    echo "[SUCCESS] ✅ Backup folder successfully synced to ${DST_PATH}"
+    RSYNC_STATUS=$?
+
+    if [[ $RSYNC_STATUS -eq 0 ]]; then
+      echo "[SUCCESS] ✅ Backup folder successfully synced to ${DST_PATH}"
+    else
+      echo "[WARN] ⚠️ Rsync completed with warnings (code ${RSYNC_STATUS})."
+      echo "[WARN] Some files or attributes might not have been transferred."
+    fi

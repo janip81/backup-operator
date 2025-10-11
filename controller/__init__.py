@@ -1,5 +1,3 @@
-import kopf
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logging.info("[INIT] backup-operator controller package loaded.")
+# controller/__init__.py
+from importlib import import_module
+import_module("controller.__main__")

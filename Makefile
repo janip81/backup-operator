@@ -86,3 +86,6 @@ run-controller:
 		-v ~/.kube/config:/root/.kube/config:ro \
 		-e WORKER_IMAGE=$(WORKER_IMG):$(TAG) \
 		$(CONTROLLER_IMG):$(TAG)
+
+run-operator:
+	PYTHONPATH=. kopf run -m controller -A
