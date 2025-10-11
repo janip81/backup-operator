@@ -1,13 +1,24 @@
-# 🧠 Backup Operator
+# 🧩 Backup Operator
+
+[![Build and Release](https://github.com/janip81/backup-operator/actions/workflows/build-release.yaml/badge.svg)](https://github.com/janip81/backup-operator/actions/workflows/build-release.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/container-ghcr.io%2Fjanip81%2Fbackup--operator-blue)](https://github.com/janip81/backup-operator/pkgs/container/backup-operator-controller)
+
 
 A lightweight Kubernetes operator written in Python using **Kopf** for handling snapshot-based backups of PVCs.  
-Designed to work seamlessly across namespaces and clusters managed by Rancher or ArgoCD.
+Designed to work seamlessly across namespaces and clusters.
 
 ---
 
 ## 🚀 Overview
 
 The **Backup Operator** automates creating, monitoring, and cleaning up **VolumeSnapshots** and temporary Jobs that back up application data to remote locations.
+
+The idea came from that i always forget my own backups, i can be up and running from a distaster at home with Cluster-api in 10-15minutes but i always forget backups in my own applications
+and as i run ArgoCD for deployment of everything including my workload clusters velero did not feel like a good match as i dont want full PVC backups and my deployments are handles by gitops.
+
+So this project was born to solve that problem for me, it is not perfect but it works for me and maybe it can work for you too. It does snapshot and runs a custom bash script inside the worker
+container that rsync/scps the data to a remote location, it can be anything that is reachable from the cluster. and i dont need to save full 50gb PVC backups to my NAS every time i do a backup.
 
 It was designed primarily for Home Assistant, Zigbee2MQTT, and other workloads running on PVC-backed persistent storage, but it works generically for any namespace or application.
 
@@ -121,7 +132,7 @@ Deploy to cluster:
 
 ```bash
 kubectl apply -f manifests/crds/
-kubectl apply -f manifests/04-deployment.yaml
+kubectl apply -f manifests/
 ```
 
 ---
@@ -134,8 +145,30 @@ Includes:
 - Non-root SSH key fix
 - Graceful error handling for deleted PVCs/snapshots/jobs
 - Prometheus metrics support
-- Stable, functional baseline for production
+- Functional baseline for production
 
 ---
+
+## 🧭 Next Steps / TODO (v0.3.0)
+
+Planned improvements for the next release:
+
+- [ ] 🧩 **Incremental backups** — track and upload only changed files between runs  
+- [ ] ♻️ **Automatic restore workflow** — ability to restore PVCs directly via `BackupRequest` CR  
+- [ ] 🔒 **Enhanced security** — restricted service account roles and scoped RBAC per namespace  
+- [ ] 💾 **Configurable retention policy** — define how many snapshots or backups to keep  
+- [ ] 📦 **Custom storage support** — add native support for MinIO, S3, or NFS targets  
+- [ ] 📊 **Expanded Prometheus metrics** — job durations, errors, and per-namespace stats  
+- [ ] ⚙️ **Operator configuration via ConfigMap** — allow dynamic runtime configuration without rebuilding the image  
+- [ ] 🐛 **More resilient cleanup** — handle stuck jobs, orphaned PVCs, or snapshot timeouts  
+- [ ] 🚀 **CI/CD automation** — auto-tag releases from GitHub Actions on version bumps  
+- [ ] 🧰 **Helm chart packaging** — make deployment and upgrades easier via Helm  
+- [ ] 🧱 **CRD refinements** — support for `spec.schedule`, custom backup methods, and restore validation
+
+---
+
+💡 *Want to contribute?*  
+Check out the [CONTRIBUTING.md](CONTRIBUTING.md) (coming soon) and open a feature branch with your proposal.
+
 
 © 2025 Jani Pesonen — TechMonkeys
