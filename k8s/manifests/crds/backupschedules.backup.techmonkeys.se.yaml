@@ -1,0 +1,92 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backupschedules.backup.techmonkeys.se
+spec:
+  group: backup.techmonkeys.se
+  names:
+    kind: BackupSchedule
+    listKind: BackupScheduleList
+    plural: backupschedules
+    singular: backupschedule
+    shortNames:
+      - bks
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: BackupSchedule spawns BackupRequests on a cron schedule.
+          properties:
+            spec:
+              type: object
+              required:
+                - targetNamespace
+                - schedule
+              properties:
+                targetNamespace:
+                  type: string
+                  description: Namespace where backups will run.
+                schedule:
+                  type: string
+                  description: Cron expression for scheduling backups.
+                snapshotClass:
+                  type: string
+                storageClass:
+                  type: string
+                sourcePVC:
+                  type: string
+                remotePath:
+                  type: string
+                transferMethod:
+                  type: string
+                  description: rsync | scp | sftp
+                retention:
+                  type: integer
+                  description: Number of backups to retain.
+                customScript:
+                  type: object
+                  description: Optional custom script or preset for backups.
+                  properties:
+                    preset:
+                      type: string
+                    key:
+                      type: string
+                      default: backup.sh
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+            status:
+              type: object
+              description: Current observed state of the schedule.
+              properties:
+                phase:
+                  type: string
+                  description: Current status phase of the schedule (e.g., Active, Failed).
+                lastRequest:
+                  type: string
+                  description: Name of the last BackupRequest triggered.
+                lastRunTime:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last backup run.
+                nextRunTime:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the next scheduled run.
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: LastRun
+          type: date
+          jsonPath: .status.lastRunTime
+        - name: NextRun
+          type: date
+          jsonPath: .status.nextRunTime

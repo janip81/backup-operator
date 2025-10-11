@@ -68,16 +68,47 @@ spec:
                       default: "backup.sh"
             status:
               type: object
+              description: Current observed state of the backup request.
               properties:
                 phase:
                   type: string
-                snapshot:
-                  type: string
-                restorePVC:
-                  type: string
-                jobName:
-                  type: string
-                backupName:
-                  type: string
+                  description: Current phase of the request (e.g. Pending, Running, Completed, Failed).
                 message:
                   type: string
+                  description: Human-readable progress message.
+                snapshot:
+                  type: string
+                  description: Name of the created VolumeSnapshot.
+                restorePVC:
+                  type: string
+                  description: Temporary PVC used for running the backup.
+                jobName:
+                  type: string
+                  description: Name of the worker Job handling the backup.
+                backupName:
+                  type: string
+                  description: Name of the resulting Backup resource.
+                lastUpdated:
+                  type: string
+                  format: date-time
+                  description: Last time the BackupRequest status was updated.
+                snapshotName:
+                  type: string
+                  description: Name of the VolumeSnapshot created during the request.
+                backupRef:
+                  type: object
+                  description: Reference to the resulting Backup CR (if created).
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Message
+          type: string
+          jsonPath: .status.message

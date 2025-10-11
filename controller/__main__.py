@@ -184,23 +184,41 @@ def get_pvc_size(ns, pvc):
     out = run(["kubectl", "-n", ns, "get", "pvc", pvc, "-o", "json"])
     return json.loads(out)["spec"]["resources"]["requests"]["storage"]
 
-def update_status(namespace, name, phase, message):
-    patch = {
-        "status": {
-            "phase": phase,
-            "message": message,
-            "updatedAt": datetime.utcnow().isoformat() + "Z",
-        }
+def update_status(namespace, name, phase, message=None, extra=None):
+    """
+    Update the status of a BackupRequest CR safely via the status subresource.
+
+    Args:
+        namespace (str): Namespace of the BackupRequest.
+        name (str): Name of the BackupRequest.
+        phase (str): Current phase (e.g. 'Starting', 'Snapshotting', 'Running', 'Completed', 'Failed').
+        message (str): Optional human-readable status message.
+        extra (dict): Optional additional status fields (e.g. snapshotName, backupRef).
+    """
+    now = datetime.utcnow().isoformat() + "Z"
+    status_block = {
+        "phase": phase,
+        "lastUpdated": now,
     }
+    if message:
+        status_block["message"] = message
+
+    # Merge optional fields like snapshotName, backupRef, etc.
+    if extra and isinstance(extra, dict):
+        status_block.update(extra)
+
+    patch = {"status": status_block}
+
     try:
         run([
             "kubectl", "-n", namespace,
             "patch", "backuprequest", name,
-            "--type=merge", "-p", json.dumps(patch)
+            "--type=merge", "--subresource=status",
+            "-p", json.dumps(patch)
         ])
-        print(f"[INFO] Status updated: {phase} - {message}")
+        print(f"[INFO] Status updated: {phase} - {message or ''}")
     except Exception as e:
-        print(f"[WARN] Could not patch status: {e}")
+        print(f"[WARN] Could not patch status for {name}: {e}")
 
 def ensure_rbac(ns, job="unknown", req="unknown", ts=None):
     if not ts:
@@ -474,7 +492,7 @@ spec:
         backup_duration.labels(namespace=src_ns, method=method).observe(duration)
         backup_job_duration.labels(namespace=src_ns, method=method, job=job).observe(duration)
 
-        completed_at = datetime.utcnow().isoformat() + "Z"
+        completed_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         backup_name = f"{app}-{ts}-{suffix}"
         minutes, seconds = divmod(int(duration), 60)
         pretty_duration = f"{minutes}m{seconds}s"
@@ -510,8 +528,42 @@ status:
   logTail: |
 {indented_log}
 """
-        run(["kubectl", "apply", "-f", "-"], input=backup_manifest)
+        # -------------------------------------------------------------
+        # Apply Backup CR (spec only)
+        # -------------------------------------------------------------
+        backup_spec_full = yaml.safe_load(backup_manifest)
+
+        # Split manifest into spec-only and status-only
+        backup_manifest_without_status = yaml.safe_dump({
+            "apiVersion": backup_spec_full["apiVersion"],
+            "kind": backup_spec_full["kind"],
+            "metadata": backup_spec_full["metadata"],
+            "spec": backup_spec_full["spec"],
+        })
+
+        # Apply CR without status
+        run(["kubectl", "apply", "-f", "-"], input=backup_manifest_without_status)
+        print(f"[INFO] Backup {backup_name} resource created without status.")
+
+        # -------------------------------------------------------------
+        # Patch status subresource (best practice)
+        # -------------------------------------------------------------
+        status_patch = json.dumps({"status": backup_spec_full["status"]})
+        run([
+            "kubectl", "-n", src_ns, "patch", "backup", backup_name,
+            "--type=merge", "--subresource=status",
+            "-p", status_patch
+        ])
         print(f"[DONE] ✅ Backup {backup_name} completed in {pretty_duration}")
+
+        # Mark BackupRequest as completed and remove it
+        try:
+            update_status(namespace, name, "Completed", f"Backup moved to Backups CR ({backup_name})")
+            # Optionally delete the BackupRequest if you want it "moved" rather than duplicated
+            run(["kubectl", "-n", namespace, "delete", "backuprequest", name, "--ignore-not-found=true"])
+            print(f"[INFO] BackupRequest {name} moved → Backup {backup_name} and deleted.")
+        except Exception as e:
+            print(f"[WARN] Could not finalize BackupRequest {name}: {e}")
 
     except Exception as e:
         reason = e.__class__.__name__

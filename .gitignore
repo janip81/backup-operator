@@ -14,6 +14,9 @@ venv/
 ENV/
 env/
 
+# Virtual environment requirements
+requirements.txt
+
 # Editors
 .vscode/
 .idea/
@@ -46,7 +49,8 @@ manifests/tmp/
 00ignored/*
 
 
-manifests/prod-k8s-ssh-key.yaml
-manifests/prod-k8s-ghcr-creds.yaml
-manifests/hass-backup.yaml
+k8s/manifests/prod-k8s-ssh-key.yaml
+k8s/manifests/prod-k8s-ghcr-creds.yaml
+k8s/manifests/hass-backup.yaml
 
+RELEASE_GUIDE.md
