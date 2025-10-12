@@ -2,30 +2,40 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    KOPF_LOGLEVEL=DEBUG
+    KOPF_LOGLEVEL=DEBUG \
+    PYTHONPATH=/app
 
-# Install kubectl and system dependencies
+# -------------------------------------------------------------------
+# Install kubectl + core utilities
+# -------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git tzdata \
-    && curl -fsSL -o /usr/local/bin/kubectl \
-         https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl \
-    && chmod +x /usr/local/bin/kubectl \
-    && rm -rf /var/lib/apt/lists/*
+ && curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+ && chmod +x /usr/local/bin/kubectl \
+ && rm -rf /var/lib/apt/lists/*
 
+# -------------------------------------------------------------------
+# Copy app and install requirements
+# -------------------------------------------------------------------
 WORKDIR /app
 
-# Copy requirements first for caching
-COPY controller/requirements.txt /app/controller/requirements.txt
-RUN pip install --no-cache-dir -r /app/controller/requirements.txt
+# Copy only requirements first for caching
+COPY controller/requirements.txt controller/requirements.txt
+RUN pip install --no-cache-dir -r controller/requirements.txt
 
-# Copy source code
-COPY controller /app/controller
-ENV PYTHONPATH=/app
+# Copy full source
+COPY controller controller
 
-# Create non-root user
+# -------------------------------------------------------------------
+# Security: non-root user
+# -------------------------------------------------------------------
 RUN useradd -u 10001 -m appuser
 USER appuser
-WORKDIR /app/controller
+WORKDIR /app
 
-# Run Kopf directly on handler file
-ENTRYPOINT ["kopf", "run", "--standalone", "--all-namespaces", "/app/controller/__main__.py"]
+# -------------------------------------------------------------------
+# Entrypoint
+# -------------------------------------------------------------------
+# Use -m to run as a module, avoids import issues
+ENTRYPOINT ["kopf", "run", "-m", "controller", "--all-namespaces"]

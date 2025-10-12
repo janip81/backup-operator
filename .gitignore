@@ -48,9 +48,7 @@ manifests/tmp/
 # Just ignored
 00ignored/*
 
-
-k8s/manifests/prod-k8s-ssh-key.yaml
-k8s/manifests/prod-k8s-ghcr-creds.yaml
-k8s/manifests/hass-backup.yaml
+# Local manifests
+at-home/**
 
 RELEASE_GUIDE.md

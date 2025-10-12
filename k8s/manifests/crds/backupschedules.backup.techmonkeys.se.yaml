@@ -37,6 +37,8 @@ spec:
                   type: string
                 storageClass:
                   type: string
+                sourcePath:
+                  type: string
                 sourcePVC:
                   type: string
                 remotePath:
