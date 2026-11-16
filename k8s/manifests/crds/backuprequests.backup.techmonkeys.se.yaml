@@ -141,6 +141,8 @@ spec:
               sourceNamespace:
                 type: string
                 description: Source namespace recorded at first admission; used for all cleanup.
+        required:
+        - spec
     subresources:
       status: {}
     additionalPrinterColumns:

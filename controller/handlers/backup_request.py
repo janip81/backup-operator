@@ -33,7 +33,13 @@ def cleanup_on_delete(body, logger, runtime, **_):
     request can go away); leftovers keep their ownership labels and stay visible to the snapshot
     metrics and alerts."""
     req = engine.Req.from_body(dict(body))
-    remaining = engine.cleanup_all(req, kube())
+    try:
+        remaining = engine.cleanup_all(req, kube())
+    except Exception as e:  # noqa: BLE001 - API errors count against the same bound
+        if runtime.total_seconds() < CLEANUP_GIVE_UP:
+            raise kopf.TemporaryError(f"Cleanup failed, retrying: {e}", delay=30) from e
+        logger.error(f"Giving up cleanup after {CLEANUP_GIVE_UP}s of errors: {e}")
+        return
     if remaining and runtime.total_seconds() < CLEANUP_GIVE_UP:
         raise kopf.TemporaryError(f"Waiting for cleanup of: {', '.join(remaining)}", delay=15)
     if remaining:
