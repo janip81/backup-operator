@@ -127,6 +127,16 @@ class FakeKube:
     def delete_configmap(self, ns, name):
         self._delete("configMap", ns, name)
 
+    def list_owned(self, kind, ns, selector):
+        self._tick()
+        want = dict(kv.split("=", 1) for kv in selector.split(","))
+        return [copy.deepcopy(o) for (n, _), o in self.objs[kind].items()
+                if n == ns and all(((o.get("metadata") or {}).get("labels") or {}).get(k) == v
+                                   for k, v in want.items())]
+
+    def delete(self, kind, ns, name):
+        self._delete(kind, ns, name)
+
     def create_cr(self, plural, ns, body):
         self._create(plural, ns, body)
 

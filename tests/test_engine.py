@@ -265,3 +265,66 @@ def test_no_admission_until_bootstrap_succeeds(kube, monkeypatch):
     adm.bootstrap([running, new])
     apply(new, engine.reconcile(new, kube, adm, T0 + timedelta(hours=11)))
     assert new["status"]["reason"] == "Queued" and "Concurrency limit" in new["status"]["message"]
+
+
+# --- #10: per-run ownership and cleanup ---
+
+def test_two_runs_same_namespace_dont_touch_each_others_objects(kube, adm, monkeypatch):
+    monkeypatch.setattr(cfg, "MAX_CONCURRENT_RUNS", 2)
+    a, b = make_req("a", uid="aaaaaaaa1", maxAttempts=1), make_req("b", pvc="other", uid="bbbbbbbb1")
+    kube.job_result = None  # jobs keep running until the test decides
+    now = T0
+    for _ in range(6):  # both reach Running
+        for body in (a, b):
+            apply(body, engine.reconcile(body, kube, adm, now))
+        kube.settle()
+        now += timedelta(seconds=10)
+    assert a["status"]["phase"] == b["status"]["phase"] == "Running"
+    kube.objs["job"][("app", "bo-aaaaaaaa-a1-job")]["status"] = {
+        "conditions": [{"type": "Failed", "status": "True", "reason": "x"}]}
+    for _ in range(6):  # a fails and cleans up while b keeps running
+        for body in (a, b):
+            apply(body, engine.reconcile(body, kube, adm, now))
+        now += timedelta(seconds=10)
+    assert a["status"]["phase"] == "Failed"
+    b_names = engine.Req.from_body(b).names()
+    for kind in ("job", "pvc", "snapshot", "secret", "configMap"):
+        assert ("app", b_names[kind]) in kube.objs[kind], kind
+    kube.job_result = "Complete"
+    run([b], kube, adm, now)
+    assert b["status"]["phase"] == "Succeeded"
+
+
+def test_foreign_object_with_our_name_is_never_used_or_deleted(kube, adm):
+    body = make_req(maxAttempts=3)
+    name = engine.Req.from_body(body).names()["snapshot"]
+    kube.objs["snapshot"][("app", name)] = {"metadata": {"name": name, "labels": {"owner": "someone-else"}},
+                                             "status": {"readyToUse": True}}
+    kube.snapshot_error = None
+    now = T0
+    for _ in range(10):
+        apply(body, engine.reconcile(body, kube, adm, now))
+        now += timedelta(seconds=10)
+    assert body["status"]["phase"] == "Failed" and body["status"]["reason"] == "NameConflict"
+    assert ("app", name) in kube.objs["snapshot"]  # untouched
+    assert kube.created["job"] == []
+
+
+def test_cleanup_all_removes_every_attempt_but_nothing_else(kube):
+    req = engine.Req.from_body(make_req(uid="aaaaaaaa1"))
+    other = engine.Req.from_body(make_req("b", uid="bbbbbbbb1"))
+    for r, attempt in ((req, 1), (req, 2), (other, 1)):
+        r.status["attempt"] = attempt
+        for kind, name in r.names(attempt).items():
+            kube.objs[kind][("app", name)] = {"metadata": {"name": name, "labels": r.labels()}}
+    assert engine.cleanup_all(req, kube)  # deletes issued
+    assert engine.cleanup_all(req, kube) == []  # all gone
+    left = {name for objs in kube.objs.values() for (_, name) in objs}
+    assert {n for n in left if n.startswith("bo-aaaaaaaa")} == set()
+    assert {n for n in left if n.startswith("bo-bbbbbbbb")} == set(other.names(1).values())
+
+
+def test_reconcile_skips_requests_being_deleted(kube, adm):
+    body = make_req()
+    body["metadata"]["deletionTimestamp"] = engine.ts(T0)
+    assert engine.reconcile(body, kube, adm, T0) is None and kube.calls == 0

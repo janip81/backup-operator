@@ -164,10 +164,28 @@ class Req:
         }
 
 
+    def selector(self) -> str:
+        return f"{MANAGED_BY[0]}={MANAGED_BY[1]},{LABEL_PREFIX}/request-uid={self.uid}"
+
+    def owns(self, obj: dict | None) -> bool:
+        labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
+        return labels.get(MANAGED_BY[0]) == MANAGED_BY[1] and labels.get(f"{LABEL_PREFIX}/request-uid") == self.uid
+
+
+def _require_owned(req: Req, obj: dict | None, kind: str, name: str) -> dict | None:
+    """An object with our deterministic name that we didn't create is never used or deleted (#10)."""
+    if obj is not None and not req.owns(obj):
+        raise AttemptFailed("NameConflict", f"{kind} {req.src_ns}/{name} exists but is not owned by this request",
+                            terminal=True)
+    return obj
+
+
 # --------------------------------------------------------------------------- reconcile
 def reconcile(body: dict, kube, admission: Admission, now: datetime, rnd=random.random) -> dict | None:
     """Run one step for a BackupRequest. Returns a status patch, or None when nothing changed."""
     req = Req.from_body(body)
+    if (body.get("metadata") or {}).get("deletionTimestamp"):
+        return None  # being deleted: the delete handler owns cleanup (#10)
     phase = req.status.get("phase") or "Pending"
     if phase in TERMINAL:
         admission.release(req.key)
@@ -276,7 +294,7 @@ def _queued(req: Req, reason: str, message: str) -> dict | None:
 
 def step_snapshotting(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
     n = req.names()
-    snap = kube.get_snapshot(req.src_ns, n["snapshot"])
+    snap = _require_owned(req, kube.get_snapshot(req.src_ns, n["snapshot"]), "VolumeSnapshot", n["snapshot"])
     if snap is None:
         kube.create_snapshot(req.src_ns, jobspec.snapshot(req, n))
         return None
@@ -297,7 +315,7 @@ def step_snapshotting(req: Req, kube, admission: Admission, now: datetime) -> di
 
 def step_cloning(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
     n = req.names()
-    pvc = kube.get_pvc(req.src_ns, n["pvc"])
+    pvc = _require_owned(req, kube.get_pvc(req.src_ns, n["pvc"]), "PersistentVolumeClaim", n["pvc"])
     if pvc is None:
         size = req.status.get("restoreSize")
         if not size:
@@ -323,9 +341,12 @@ def _waits_for_consumer(kube, pvc: dict) -> bool:
 
 def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
     n = req.names()
-    job = kube.get_job(req.src_ns, n["job"])
+    job = _require_owned(req, kube.get_job(req.src_ns, n["job"]), "Job", n["job"])
     if job is None:
         jobspec.ensure_dependencies(req, n, kube)
+        for kind, getter in (("ConfigMap", kube.get_configmap), ("Secret", kube.get_secret)):
+            name = n["configMap" if kind == "ConfigMap" else "secret"]
+            _require_owned(req, getter(req.src_ns, name), kind, name)
         kube.create_job(req.src_ns, jobspec.worker_job(req, n))
         return None
     for c in (job.get("status") or {}).get("conditions") or []:
@@ -353,8 +374,8 @@ def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict |
         ("configMap", kube.get_configmap, kube.delete_configmap),
     ):
         obj = getter(ns, n[kind])
-        if obj is None:
-            continue
+        if obj is None or not req.owns(obj):
+            continue  # gone, or not ours: never delete objects this request didn't create
         remaining.append(n[kind])
         if not (obj.get("metadata") or {}).get("deletionTimestamp"):
             deleter(ns, n[kind])
@@ -365,6 +386,21 @@ def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict |
                 return {"reason": "CleanupStuck", "message": msg}
         return None
     return _finalize(req, req.status.get("outcome") or "failed", now, kube)
+
+
+def cleanup_all(req: Req, kube) -> list[str]:
+    """Delete every object any attempt of this request created (label-selected, ownership-checked).
+    Used when a request is deleted mid-run. Returns the names still waiting to disappear."""
+    remaining = []
+    for kind in ("job", "pvc", "snapshot", "secret", "configMap"):
+        for obj in kube.list_owned(kind, req.src_ns, req.selector()):
+            if not req.owns(obj):
+                continue
+            name = obj["metadata"]["name"]
+            remaining.append(name)
+            if not obj["metadata"].get("deletionTimestamp"):
+                kube.delete(kind, req.src_ns, name)
+    return remaining
 
 
 def _finalize(req: Req, outcome: str, now: datetime, kube=None) -> dict:

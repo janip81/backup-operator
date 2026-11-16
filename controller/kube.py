@@ -140,6 +140,19 @@ class Kube:
     def delete_configmap(self, ns: str, name: str) -> None:
         self._call(self.core.delete_namespaced_config_map, name, ns, ok_status=(404,))
 
+    # --- generic by kind (used by cleanup) ---
+    def list_owned(self, kind: str, ns: str, selector: str) -> list[dict]:
+        if kind == "snapshot":
+            return self.list_snapshots(ns, selector)
+        fn = {"job": self.batch.list_namespaced_job, "pvc": self.core.list_namespaced_persistent_volume_claim,
+              "secret": self.core.list_namespaced_secret, "configMap": self.core.list_namespaced_config_map}[kind]
+        res = self._dict(self._call(fn, ns, label_selector=selector))
+        return (res or {}).get("items", [])
+
+    def delete(self, kind: str, ns: str, name: str) -> None:
+        {"job": self.delete_job, "pvc": self.delete_pvc, "snapshot": self.delete_snapshot,
+         "secret": self.delete_secret, "configMap": self.delete_configmap}[kind](ns, name)
+
     # --- operator CRs ---
     def create_cr(self, plural: str, ns: str, body: dict) -> None:
         self._call(self.custom.create_namespaced_custom_object, cfg.GROUP, cfg.VERSION, ns, plural, body,
