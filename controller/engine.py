@@ -381,9 +381,13 @@ def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | 
 def record_name(req: Req, existing: dict | None) -> str:
     """The record is named after the request. If an unrelated record (a deleted request that used the same
     name) already holds that name, this request's record gets a UID suffix instead of adopting it."""
-    if existing is None or (existing.get("spec") or {}).get("requestRef", {}).get("uid") in (req.uid, None):
+    if existing is None or _record_uid(existing) == req.uid:
         return req.name
     return f"{req.name[:54]}-{req.uid[:8]}"
+
+
+def _record_uid(rec: dict | None) -> str | None:
+    return (((rec or {}).get("spec") or {}).get("requestRef") or {}).get("uid")
 
 
 def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
@@ -396,8 +400,11 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
     if name != req.status.get("backupRef"):
         return {"backupRef": name}  # persist the chosen name first, then write the record next cycle
     rec = kube.get_cr("backups", req.namespace, name)
-    if rec is not None and (rec.get("spec") or {}).get("requestRef", {}).get("uid") not in (req.uid, None):
-        raise TransientApiError(f"Backup {name} belongs to another request")  # never adopt or overwrite it
+    if rec is None:
+        kube.create_cr("backups", req.namespace, jobspec.backup_record(req, name))
+        return None  # next cycle reads it back and checks it is ours before writing the result
+    if _record_uid(rec) != req.uid:  # includes records without a UID: never adopted or overwritten
+        raise TransientApiError(f"Backup {name} exists but was not created by this request")
     stored = (rec or {}).get("status") or {}
     if stored.get("phase") == phase:  # durable: verified by reading it back
         completed = parse_ts(stored.get("completedAt")) or now
@@ -411,8 +418,6 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
                 "message": f"{phase} recorded as Backup {name}; removing temporary resources"}
 
     result = _job_result(req, kube)
-    if rec is None:
-        kube.create_cr("backups", req.namespace, jobspec.backup_record(req, name))
     started = parse_ts(req.status.get("startedAt"))
     completed = parse_ts(req.status.get("completedAt")) or now
     status = {
@@ -423,7 +428,9 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
         "message": (req.status.get("message") or "")[:1000] if phase == "Failed" else "Backup completed",
         "result": result.get("result"), "artifact": result.get("artifact"),
     }
-    kube.patch_cr_status("backups", req.namespace, name, {k: v for k, v in status.items() if v is not None})
+    # Conditional on the version we just verified as ours: a replaced record makes this fail (409), not overwrite.
+    kube.patch_cr_status("backups", req.namespace, name, {k: v for k, v in status.items() if v is not None},
+                         resource_version=rec["metadata"].get("resourceVersion"))
     return None  # next cycle reads the record back before cleanup starts
 
 

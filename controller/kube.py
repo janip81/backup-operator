@@ -175,7 +175,11 @@ class Kube:
         res = self._call(self.custom.list_cluster_custom_object, cfg.GROUP, cfg.VERSION, plural)
         return (res or {}).get("items", [])
 
-    def patch_cr_status(self, plural: str, ns: str, name: str, status: dict) -> None:
+    def patch_cr_status(self, plural: str, ns: str, name: str, status: dict,
+                        resource_version: str | None = None) -> None:
         # 404 is not success here: a missing record must be retried, never treated as persisted (#11).
-        self._call(self.custom.patch_namespaced_custom_object_status, cfg.GROUP, cfg.VERSION, ns, plural, name,
-                   {"status": status})
+        # With resource_version the write is conditional (409 if the object changed or was replaced).
+        body: dict = {"status": status}
+        if resource_version:
+            body["metadata"] = {"resourceVersion": resource_version}
+        self._call(self.custom.patch_namespaced_custom_object_status, cfg.GROUP, cfg.VERSION, ns, plural, name, body)

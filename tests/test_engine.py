@@ -287,7 +287,7 @@ def test_two_runs_same_namespace_dont_touch_each_others_objects(kube, adm, monke
     assert a["status"]["phase"] == b["status"]["phase"] == "Running"
     kube.objs["job"][("app", "bo-aaaaaaaa-a1-job")]["status"] = {
         "conditions": [{"type": "Failed", "status": "True", "reason": "x"}]}
-    for _ in range(6):  # a fails and cleans up while b keeps running
+    for _ in range(12):  # a fails, records and cleans up while b keeps running
         for body in (a, b):
             apply(body, engine.reconcile(body, kube, adm, now))
         now += timedelta(seconds=10)
@@ -471,7 +471,7 @@ def test_record_deleted_before_status_write_is_retried_not_trusted(kube, adm):
     kube.create_cr = vanish
     now += timedelta(minutes=10)
     apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
-    assert body["status"]["phase"] == "Recording" and body["status"]["apiErrors"] == 1  # 404 is not success
+    assert body["status"]["phase"] == "Recording"  # the vanished record is not trusted
     while body["status"]["phase"] == "Recording":
         assert ("app", engine.Req.from_body(body).names()["job"]) in kube.objs["job"]  # nothing cleaned up yet
         now += timedelta(minutes=10)
@@ -517,3 +517,43 @@ def test_delayed_recording_keeps_transfer_completion_time(kube, adm):
     assert engine.parse_ts(rec["recordedAt"]) > transfer_done + timedelta(hours=4)
     gauge = metrics.LAST_SUCCESS.labels(namespace="app", source="data")._value.get()
     assert gauge == transfer_done.timestamp()
+
+
+@pytest.mark.parametrize("phase", ["Succeeded", "Failed"])
+def test_record_without_uid_is_never_adopted(kube, adm, phase):
+    kube.objs["backups"][("app", "r1")] = {"metadata": {"name": "r1", "resourceVersion": "1"}, "spec": {},
+                                           "status": {"phase": phase, "completedAt": "2026-01-01T00:00:00Z"}}
+    body = make_req()
+    run([body], kube, adm, T0)
+    assert body["status"]["phase"] == "Succeeded" and body["status"]["backupRef"] == "r1-01234567"
+    assert kube.objs["backups"][("app", "r1")]["status"] == {"phase": phase, "completedAt": "2026-01-01T00:00:00Z"}
+
+
+def test_concurrently_created_foreign_record_is_not_overwritten(kube, adm):
+    body = make_req()
+    now = _until(body, kube, adm, T0, "Recording")
+    apply(body, engine.reconcile(body, kube, adm, now))  # backupRef chosen: r1
+    real_create = kube.create_cr
+
+    def race(plural, ns, b):  # someone else creates r1 first; our create conflicts (409 = no-op)
+        kube.create_cr = real_create
+        kube.objs[plural][(ns, "r1")] = {"metadata": {"name": "r1", "resourceVersion": "900"},
+                                         "spec": {"requestRef": {"uid": "someone-else"}}, "status": {}}
+        real_create(plural, ns, b)
+
+    kube.create_cr = race
+    for _ in range(5):
+        now += timedelta(minutes=10)
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        assert body["status"]["phase"] == "Recording"
+    foreign = kube.objs["backups"][("app", "r1")]
+    assert foreign["spec"]["requestRef"]["uid"] == "someone-else" and foreign["status"] == {}
+    assert "not created by this request" in body["status"]["lastError"]
+
+
+def test_status_write_is_conditional_on_verified_version(kube):
+    kube.objs["backups"][("app", "r1")] = {"metadata": {"name": "r1", "resourceVersion": "5"}, "spec": {}}
+    from controller.kube import TransientApiError
+    with pytest.raises(TransientApiError):
+        kube.patch_cr_status("backups", "app", "r1", {"phase": "Succeeded"}, resource_version="4")
+    assert "status" not in kube.objs["backups"][("app", "r1")]

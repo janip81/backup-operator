@@ -42,6 +42,7 @@ class FakeKube:
             self.uid_seq = getattr(self, "uid_seq", 0) + 1
             self.objs[kind][key] = copy.deepcopy(body)
             self.objs[kind][key]["metadata"]["uid"] = f"uid-{self.uid_seq}"
+            self.objs[kind][key]["metadata"]["resourceVersion"] = str(self.uid_seq)
             self.created[kind].append(key[1])
         live = len(self.objs["snapshot"])
         self.max_live_snapshots = max(self.max_live_snapshots, live)
@@ -162,9 +163,13 @@ class FakeKube:
     def get_cr(self, plural, ns, name):
         return self._get(plural, ns, name)
 
-    def patch_cr_status(self, plural, ns, name, status):
+    def patch_cr_status(self, plural, ns, name, status, resource_version=None):
         self._tick()
         o = self.objs[plural].get((ns, name))
         if o is None:
             raise TransientApiError("HTTP 404 Not Found")
+        if resource_version and o["metadata"].get("resourceVersion") != resource_version:
+            raise TransientApiError("HTTP 409 Conflict")
         o.setdefault("status", {}).update(status)
+        self.uid_seq = getattr(self, "uid_seq", 0) + 1
+        o["metadata"]["resourceVersion"] = str(self.uid_seq)
