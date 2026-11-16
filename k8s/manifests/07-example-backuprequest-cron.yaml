@@ -8,5 +8,5 @@ spec:
   sourcePVC: home-assistant-home-assistant
   snapshotClass: vsphere-csi-snapclass
   backupNamespace: backup
-  remotePath: "user@starbase:/mnt/backups/home-assistant"
+  remotePath: "user@nas.example:/backups/home-assistant"
   schedule: "0 3 * * *"

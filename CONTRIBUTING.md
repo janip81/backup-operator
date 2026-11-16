@@ -11,30 +11,28 @@ We follow a **Git Feature Branch Workflow**:
 
 | Branch | Purpose |
 |---------|----------|
-| `main` | Production-ready releases (protected) |
-| `develop` | Latest tested integration branch |
-| `feature/*` | Active work branches for new features or fixes |
+| `main` | Default branch; all PRs target it (protected) |
+| `develop` | Legacy integration branch; CI also builds it. Don't target it with PRs. |
+| `feature/*`, `fix/*`, `docs/*` | Work branches |
 
 ### Create a new feature
 ```bash
-git checkout develop
-git pull origin develop
+git checkout main
+git pull origin main
 git checkout -b feature/<short-description>
 ```
 
 When finished:
 1. Commit and push your changes  
-2. Open a Pull Request → base: `develop`  
+2. Open a Pull Request → base: `main`, link the issue (`Fixes #N`)  
 3. Request review or merge once CI passes  
 
 ---
 
 ## 🧪 Testing Workflows
 
-- GitHub Actions automatically builds images on push to `develop` or `main`
-- To test a workflow manually:
-  1. Push to your feature branch  
-  2. Go to **Actions → Build and Release Docker Images → Run workflow**
+- GitHub Actions builds and pushes images on pushes to `main` and `develop` and on `v*.*.*` tags.
+- PRs are **not** built yet, and the workflow has no manual trigger (tracked in #14). Build locally before opening a PR.
 
 ---
 
@@ -64,22 +62,19 @@ If you want to build locally before committing:
 ```bash
 make build
 ```
-or to push manually:
-```bash
-make push TAG=test
-```
+Don't push by hand to the tags CI manages (`develop`, `latest`, `v*`); see #14.
 
 ---
 
 ## 🧾 Release Process
 
-1. Merge `develop` → `main` when stable  
+1. Make sure `main` is green  
 2. Tag a version:
    ```bash
    git tag -a v0.3.0 -m "Release v0.3.0"
    git push origin v0.3.0
    ```
-3. GitHub Actions will build and push release images automatically
+3. GitHub Actions builds and pushes the `vX.Y.Z` images (`latest` is published from `main` pushes only)
 
 ---
 

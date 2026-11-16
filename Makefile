@@ -77,7 +77,7 @@ run-worker:
 		-e SOURCE_PVC=home-assistant-home-assistant \
 		-e SNAPSHOT_CLASS=vsphere-csi-snapclass \
 		-e BACKUP_NAMESPACE=backup \
-		-e REMOTE_PATH=backup@starbase:/s3/test-backup/ \
+		-e REMOTE_PATH=backup@nas.example:/backups/test/ \
 		-e SSH_PRIVATE_KEY="$$(cat ~/.ssh/id_ed25519_backup)" \
 		$(WORKER_IMG):$(TAG)
 
