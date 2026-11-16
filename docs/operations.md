@@ -6,7 +6,9 @@
    `kubectl -n <ns> get backupschedule <name>` → `READY True`. If not, the Ready condition says why
    (`kubectl -n <ns> get backupschedule <name> -o jsonpath='{.status.conditions}'`).
 2. Trigger a run without waiting for the cron tick with a one-off request using the same template
-   (see `examples/backup-once.yaml`), and follow it:
+   (see `examples/backup-once.yaml`). Give it the label `backup.techmonkeys.se/schedule: <schedule name>`
+   so it uses the schedule's source identity (without the label, an ad-hoc request is identified by
+   its PVC name). Follow it:
    `kubectl -n <ns> get backuprequest <name> -w` (Pending → Snapshotting → Cloning → Running →
    Recording → CleaningUp → Succeeded).
 3. Check the record: `kubectl -n <ns> get backup <name> -o yaml` → `status.phase: Succeeded`,
@@ -16,8 +18,9 @@
 
 ## Restore check (before relying on a schedule)
 
-1. Restore the newest snapshot into a **new** PVC with `examples/restore-job.yaml` (set
-   `BACKUP_SOURCE` to the schedule name and `BACKUP_HOST` to the namespace).
+1. Restore the exact snapshot of the supervised run into a **new** PVC with `examples/restore-job.yaml`:
+   set `RESTORE_SNAPSHOT` to `status.artifact.shortId` from its Backup record. (For `latest`, set
+   `BACKUP_SOURCE` to the source shown in the record, `status.source`, and `BACKUP_HOST` to the namespace.)
 2. Mount the restored PVC in a throwaway pod and compare with the live data, e.g. file counts and
    checksums of a few important files; for `sqlite`, open the database and run `PRAGMA integrity_check`.
 3. Delete the throwaway pod, Job and PVC.

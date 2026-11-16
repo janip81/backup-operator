@@ -9,7 +9,9 @@ PersistentVolumes: it snapshots the volume, lets a **plugin** pick what to keep,
 versioned, encrypted [restic](https://restic.net/) snapshot in S3, a REST server or over SFTP.
 
 > **Status (2026-11):** v0.4 is a rework of the operator (issues #8–#15). It is not released yet;
-> use it in production only after the v0.4.0 release and a supervised first run (see
+> v0.4 has been tested with unit tests, worker integration tests and on a disposable kind cluster, not
+> yet in production. Try it on a non-production cluster first, and in production only after the
+> v0.4.0 release and a supervised first run (see
 > [docs/operations.md](docs/operations.md)). v0.3 objects must be migrated, see
 > [docs/upgrade-0.4.md](docs/upgrade-0.4.md).
 

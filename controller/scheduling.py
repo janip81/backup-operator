@@ -60,20 +60,24 @@ def request_name(schedule: str, uid: str, tick: datetime) -> str:
 def validate(spec: dict, ns: str, kube) -> tuple[bool, str, str]:
     """Check what a run needs before creating it (#15): valid repository URL, an existing Bound source PVC,
     the credentials Secret (with RESTIC_PASSWORD) and, for custom plugins, the script ConfigMap."""
-    from .jobspec import REPO_URL
+    from .jobspec import repository_problem
     t = spec.get("template") or {}
     src_ns = t.get("sourceNamespace") or ns
     repo = t.get("repository") or {}
-    if not REPO_URL.match(repo.get("url") or ""):
-        return False, "InvalidRepository", "Repository URL is not supported or contains credentials"
+    problem = repository_problem(repo, None)
+    if problem:
+        return False, problem[0], problem[1]
     pvc = kube.get_pvc(src_ns, t.get("sourcePVC") or "")
     if not pvc:
         return False, "SourcePVCNotFound", f"Source PVC {src_ns}/{t.get('sourcePVC')} not found"
     if (pvc.get("status") or {}).get("phase") != "Bound":
         return False, "SourcePVCNotBound", f"Source PVC {src_ns}/{t.get('sourcePVC')} is not Bound"
     secret = kube.get_secret(src_ns, repo.get("credentialsSecret") or "")
-    if not secret or "RESTIC_PASSWORD" not in (secret.get("data") or {}):
-        return False, "CredentialsNotFound", f"Secret {src_ns}/{repo.get('credentialsSecret')} with RESTIC_PASSWORD not found"
+    if not secret:
+        return False, "CredentialsNotFound", f"Secret {src_ns}/{repo.get('credentialsSecret')} not found"
+    problem = repository_problem(repo, list((secret.get("data") or {}).keys()))
+    if problem:
+        return False, problem[0], f"{problem[1]} ({src_ns}/{repo.get('credentialsSecret')})"
     plugin = t.get("plugin") or {}
     if plugin.get("name") == "custom":
         ref = plugin.get("configMapRef") or {}

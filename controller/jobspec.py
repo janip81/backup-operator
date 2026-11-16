@@ -69,13 +69,28 @@ REPO_URL = re.compile(
     r"|sftp:[a-z_][a-z0-9_.-]{0,31}@[A-Za-z0-9.-]+:/[A-Za-z0-9._~/-]*)$")
 
 
+def repository_problem(repo: dict, secret_keys) -> tuple[str, str] | None:
+    """The worker's local prerequisites, checked up front (same rules as worker/bo-worker)."""
+    url = repo.get("url") or ""
+    if not REPO_URL.match(url):
+        return "InvalidRepository", ("Repository URL is not supported or contains credentials; use "
+                                     "s3:https://host/bucket/prefix, rest:https://host/path or sftp:user@host:/path")
+    if url.split(":", 1)[0] in ("s3", "rest") and url.split(":", 1)[1].startswith("http://") \
+            and not repo.get("allowInsecure"):
+        return "InsecureRepository", "Plain-http repository needs allowInsecure (tests only)"
+    if secret_keys is not None:
+        if "RESTIC_PASSWORD" not in secret_keys:
+            return "CredentialsNotFound", "Credentials Secret has no RESTIC_PASSWORD"
+        if url.startswith("sftp:") and not {"ssh-privatekey", "known_hosts"} <= set(secret_keys):
+            return "CredentialsNotFound", "SFTP repositories need ssh-privatekey and known_hosts in the Secret"
+    return None
+
+
 def validate_repository(req) -> None:
     from .engine import AttemptFailed
-    url = (req.spec.get("repository") or {}).get("url") or ""
-    if not REPO_URL.match(url):
-        raise AttemptFailed("InvalidRepository", "Repository URL is not supported or contains credentials; "
-                            "use s3:https://host/bucket/prefix, rest:https://host/path or sftp:user@host:/path "
-                            "and put credentials in the Secret", terminal=True)
+    problem = repository_problem(req.spec.get("repository") or {}, None)
+    if problem:
+        raise AttemptFailed(problem[0], problem[1], terminal=True)
 
 
 def _safe_url(req) -> str | None:
@@ -90,10 +105,12 @@ def ensure_dependencies(req, n: dict, kube) -> None:
     validate_repository(req)
     repo = req.spec.get("repository") or {}
     secret = kube.get_secret(req.src_ns, repo.get("credentialsSecret", ""))
-    if not secret or "RESTIC_PASSWORD" not in (secret.get("data") or {}):
-        raise AttemptFailed("CredentialsNotFound",
-                            f"Secret {req.src_ns}/{repo.get('credentialsSecret')} with key RESTIC_PASSWORD not found",
+    if not secret:
+        raise AttemptFailed("CredentialsNotFound", f"Secret {req.src_ns}/{repo.get('credentialsSecret')} not found",
                             terminal=True)
+    problem = repository_problem(repo, list((secret.get("data") or {}).keys()))
+    if problem:
+        raise AttemptFailed(problem[0], f"{problem[1]} ({req.src_ns}/{repo.get('credentialsSecret')})", terminal=True)
     plugin = _plugin(req)
     if plugin.get("name") == "custom":
         ref = plugin.get("configMapRef") or {}

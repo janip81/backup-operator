@@ -214,6 +214,8 @@ def test_validation_flags_broken_setup_and_skips_ticks(kube):
     (lambda t: t["repository"].update(url="s3:https://k:s@h/b"), "InvalidRepository"),
     (lambda t: t["repository"].update(credentialsSecret="nope"), "CredentialsNotFound"),
     (lambda t: t.update(plugin={"name": "custom", "configMapRef": {"name": "nope"}}), "PluginNotFound"),
+    (lambda t: t["repository"].update(url="s3:http://minio.local/b"), "InsecureRepository"),
+    (lambda t: t["repository"].update(url="sftp:backup@nas.example:/srv/r"), "CredentialsNotFound"),
 ])
 def test_validation_reasons(kube, change, reason):
     s = schedule()
@@ -231,3 +233,15 @@ def test_spec_change_revalidates_once(kube):
     s["metadata"]["generation"] = 2
     apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=3)))
     assert kube.calls > calls and s["status"]["observedGeneration"] == 2
+
+
+def test_insecure_allowed_and_complete_sftp_secret_are_ready(kube):
+    s = schedule()
+    s["spec"]["template"]["repository"].update(url="s3:http://minio.local/b", allowInsecure=True)
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=1)))
+    assert s["status"]["conditions"][0]["status"] == "True"
+    kube.secrets[("app", "sftp")] = {"data": {"RESTIC_PASSWORD": "x", "ssh-privatekey": "x", "known_hosts": "x"}}
+    s2 = schedule()
+    s2["spec"]["template"]["repository"] = {"url": "sftp:backup@nas.example:/srv/r", "credentialsSecret": "sftp"}
+    apply(s2, scheduling.reconcile_schedule(s2, kube, CREATED + timedelta(minutes=1)))
+    assert s2["status"]["conditions"][0]["status"] == "True"
