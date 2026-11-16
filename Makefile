@@ -11,7 +11,7 @@ CONTROLLER_IMG  := $(IMAGE_BASE)-controller
 WORKER_IMG      := $(IMAGE_BASE)-worker
 PY_IMAGE        := python:3.13-slim
 
-.PHONY: all build build-controller build-worker push guard-tag lint test check clean run-operator
+.PHONY: all build build-controller build-worker push guard-tag lint test check fix clean run-operator
 
 all: build
 
@@ -35,9 +35,15 @@ push: guard-tag
 check:
 	docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
 	  -v "$(CURDIR):/src" -w /src $(PY_IMAGE) sh -c \
-	  "pip install -q --user -r requirements-dev.txt && ~/.local/bin/ruff check --no-cache . && python -m pytest -q -p no:cacheprovider"
+	  "pip install -q --user --no-warn-script-location -r requirements-dev.txt && ~/.local/bin/ruff check --no-cache . && python -m pytest -q -p no:cacheprovider"
 
 lint test: check
+
+# Apply ruff's safe autofixes.
+fix:
+	docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp \
+	  -v "$(CURDIR):/src" -w /src $(PY_IMAGE) sh -c \
+	  "pip install -q --user --no-warn-script-location ruff==0.17.5 && ~/.local/bin/ruff check --no-cache --fix ."
 
 clean:
 	-docker rmi $(CONTROLLER_IMG):$(TAG) $(WORKER_IMG):$(TAG)

@@ -1,12 +1,18 @@
 import json
+import random
+import string
 from datetime import UTC, datetime
 
 import croniter
 import kopf
+import yaml
 
 from ..config import DEFAULT_STORAGE
-from ..utils.kubectl import run
-from ..utils.misc import rand_suffix
+from ..runtime import kube
+
+
+def rand_suffix(n=5):
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
 @kopf.timer("backup.techmonkeys.se", "v1", "backupschedules", interval=60.0)
@@ -71,7 +77,7 @@ spec:
     preset: {custom_script.get('preset')}
 """
 
-        run(["kubectl", "apply", "-f", "-"], input=backup_req)
+        kube().create_cr("backuprequests", namespace, yaml.safe_load(backup_req))
 
         patch["status"].update(
             {
@@ -81,17 +87,4 @@ spec:
             }
         )
 
-    run(
-        [
-            "kubectl",
-            "-n",
-            namespace,
-            "patch",
-            "backupschedule",
-            name,
-            "--type=merge",
-            "--subresource=status",
-            "-p",
-            json.dumps(patch),
-        ]
-    )
+    kube().patch_cr_status("backupschedules", namespace, name, patch["status"])

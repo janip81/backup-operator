@@ -10,105 +10,143 @@ spec:
     plural: backuprequests
     singular: backuprequest
     shortNames:
-      - bkr
-      - bkre
+    - bkr
+    - bkre
   versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          description: "BackupRequest triggers a backup run."
-          properties:
-            spec:
-              type: object
-              required:
-                - sourceNamespace
-                - sourcePVC
-                - snapshotClass
-                - storageClass
-                - remotePath
-              properties:
-                sourceNamespace:
-                  type: string
-                sourcePVC:
-                  type: string
-                snapshotClass:
-                  type: string
-                storageClass:
-                  type: string
-                backupNamespace:
-                  type: string
-                  description: "Optional override for job namespace (defaults to operator ns)."
-                runInSourceNamespace:
-                  type: boolean
-                  default: false
-                remotePath:
-                  type: string
-                sourcePath:
-                  type: string
-                retention:
-                  type: integer
-                transferMethod:
-                  type: string
-                  description: "rsync | scp | sftp"
-                customScript:
-                  type: object
-                  description: "Use script from ConfigMap or preset."
-                  properties:
-                    preset:
-                      type: string
-                    name:
-                      type: string
-                    namespace:
-                      type: string
-                    key:
-                      type: string
-                      default: "backup.sh"
-            status:
-              type: object
-              description: Current observed state of the backup request.
-              properties:
-                phase:
-                  type: string
-                  description: Current phase of the request (e.g. Pending, Running, Completed, Failed).
-                message:
-                  type: string
-                  description: Human-readable progress message.
-                snapshot:
-                  type: string
-                  description: Name of the created VolumeSnapshot.
-                restorePVC:
-                  type: string
-                  description: Temporary PVC used for running the backup.
-                jobName:
-                  type: string
-                  description: Name of the worker Job handling the backup.
-                backupName:
-                  type: string
-                  description: Name of the resulting Backup resource.
-                lastUpdated:
-                  type: string
-                  format: date-time
-                  description: Last time the BackupRequest status was updated.
-                snapshotName:
-                  type: string
-                  description: Name of the VolumeSnapshot created during the request.
-                backupRef:
-                  type: object
-                  description: Reference to the resulting Backup CR (if created).
-                  properties:
-                    name:
-                      type: string
-                    namespace:
-                      type: string
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Message
-          type: string
-          jsonPath: .status.message
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        description: BackupRequest triggers a backup run.
+        properties:
+          spec:
+            type: object
+            required:
+            - sourcePVC
+            - snapshotClass
+            - remotePath
+            properties:
+              sourceNamespace:
+                type: string
+                description: Namespace of the source PVC. Defaults to the request's namespace.
+              sourcePVC:
+                type: string
+              snapshotClass:
+                type: string
+              storageClass:
+                type: string
+                description: StorageClass for the temporary PVC. Defaults to the operator's DEFAULT_STORAGE_CLASS or the cluster
+                  default.
+              remotePath:
+                type: string
+              sourcePath:
+                type: string
+              retention:
+                type: integer
+              transferMethod:
+                type: string
+                description: rsync | scp | sftp
+              customScript:
+                type: object
+                description: Use script from ConfigMap or preset.
+                properties:
+                  preset:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  key:
+                    type: string
+                    default: backup.sh
+              maxAttempts:
+                type: integer
+                minimum: 1
+                maximum: 10
+                description: 'Attempts before the request is marked Failed (default: operator DEFAULT_MAX_ATTEMPTS).'
+          status:
+            type: object
+            description: Observed state, written by the operator.
+            properties:
+              phase:
+                type: string
+                description: Pending, Snapshotting, Cloning, Running, CleaningUp, Succeeded or Failed.
+                enum:
+                - Pending
+                - Snapshotting
+                - Cloning
+                - Running
+                - CleaningUp
+                - Succeeded
+                - Failed
+              reason:
+                type: string
+                description: Machine-readable reason for the current phase or failure.
+              message:
+                type: string
+                description: Human-readable progress or error message.
+              attempt:
+                type: integer
+                description: Current attempt number (1-based).
+              maxAttempts:
+                type: integer
+                description: Attempt budget for this request.
+              outcome:
+                type: string
+                description: Outcome being finalized during CleaningUp (succeeded, retry, failed).
+              nextAttemptAt:
+                type: string
+                description: The operator won't act on this request before this time (backoff).
+                format: date-time
+              phaseStartedAt:
+                type: string
+                description: When the current phase started (used for phase timeouts).
+                format: date-time
+              startedAt:
+                type: string
+                description: When the first attempt was admitted.
+                format: date-time
+              finishedAt:
+                type: string
+                description: When the request reached a terminal phase.
+                format: date-time
+              apiErrors:
+                type: integer
+                description: Consecutive transient API errors in the current step.
+              lastError:
+                type: string
+                description: Most recent error.
+              restoreSize:
+                type: string
+                description: Snapshot restore size used for the temporary PVC.
+              resources:
+                type: object
+                description: Names of this attempt's temporary objects in the source namespace.
+                properties:
+                  snapshot:
+                    type: string
+                  pvc:
+                    type: string
+                  job:
+                    type: string
+                  secret:
+                    type: string
+                  configMap:
+                    type: string
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: Attempt
+      type: integer
+      jsonPath: .status.attempt
+    - name: Reason
+      type: string
+      jsonPath: .status.reason
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
