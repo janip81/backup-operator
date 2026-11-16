@@ -67,11 +67,12 @@ def api_error_delay(errors: int, rnd=random.random) -> float:
 
 # --------------------------------------------------------------------------- admission
 class Admission:
-    """In-process admission control. The operator runs as a single active replica (kopf peering),
-    so an in-memory registry plus a startup grace period is enough to bound concurrency."""
+    """In-process admission control. The operator runs as a single active replica (kopf peering).
+    New runs are admitted only after a successful bootstrap has registered every run that was
+    already active, so a restart can never exceed the limits."""
 
-    def __init__(self, started_at: datetime):
-        self.started_at = started_at
+    def __init__(self, ready: bool = False):
+        self.ready = ready
         self._lock = threading.Lock()
         self._active: dict[str, str] = {}  # request key -> source pvc key
 
@@ -87,8 +88,8 @@ class Admission:
         with self._lock:
             if key in self._active:
                 return True, ""
-            if now < self.started_at + timedelta(seconds=cfg.ADMISSION_DELAY):
-                return False, "Operator starting; waiting for in-flight runs to report"
+            if not self.ready:
+                return False, "Operator starting; waiting for the list of in-flight runs"
             if pvc_key in self._active.values():
                 return False, f"Another run is active for {pvc_key}"
             if len(self._active) >= cfg.MAX_CONCURRENT_RUNS:
@@ -103,6 +104,7 @@ class Admission:
             if phase in ACTIVE:
                 req = Req.from_body(body)
                 self.note_active(req.key, req.pvc_key)
+        self.ready = True
 
     def active_count(self) -> int:
         with self._lock:

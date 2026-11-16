@@ -39,7 +39,7 @@ def run(bodies, kube, adm, now, cycles=200, step=timedelta(seconds=10)):
 
 @pytest.fixture
 def adm():
-    return engine.Admission(started_at=T0 - timedelta(hours=1))
+    return engine.Admission(ready=True)
 
 
 @pytest.fixture
@@ -160,17 +160,16 @@ def test_snapshot_ceiling_blocks_new_snapshots(kube, adm):
     assert adm.active_count() == 0
 
 
-def test_admission_waits_after_startup_and_reregisters_active_runs(kube):
-    adm = engine.Admission(started_at=T0)
+def test_running_request_reregisters_after_restart(kube, monkeypatch):
+    monkeypatch.setattr(cfg, "MAX_CONCURRENT_RUNS", 1)
+    adm = engine.Admission(ready=True)
     running = make_req("a", uid="aaaaaaaa1")
     running["status"] = {"phase": "Running", "attempt": 1, "phaseStartedAt": engine.ts(T0)}
     kube.objs["job"][("app", "bo-aaaaaaaa-a1-job")] = {"metadata": {"name": "bo-aaaaaaaa-a1-job"}, "status": {}}
+    engine.reconcile(running, kube, adm, T0 + timedelta(seconds=10))
     new = make_req("b", pvc="other", uid="bbbbbbbb1")
-    apply(new, engine.reconcile(new, kube, adm, T0 + timedelta(seconds=5)))
-    assert new["status"]["reason"] == "Queued" and "starting" in new["status"]["message"]
-    engine.reconcile(running, kube, adm, T0 + timedelta(seconds=10))  # restart: running request re-registers
     apply(new, engine.reconcile(new, kube, adm, T0 + timedelta(seconds=60)))
-    assert new["status"]["phase"] == "Pending"  # still blocked by the concurrency limit of 1
+    assert new["status"]["reason"] == "Queued"
 
 
 def test_missing_source_pvc_fails_without_creating_anything(kube, adm):
@@ -189,19 +188,19 @@ def test_retry_delay_is_capped_with_jitter():
 
 def test_restart_running_request_in_backoff_still_counts(kube, monkeypatch):
     monkeypatch.setattr(cfg, "MAX_CONCURRENT_RUNS", 1)
-    adm = engine.Admission(started_at=T0)
+    adm = engine.Admission(ready=True)  # e.g. bootstrap raced with a status write
     running = make_req("a", uid="aaaaaaaa1")
     running["status"] = {"phase": "Running", "attempt": 1, "phaseStartedAt": engine.ts(T0),
                          "nextAttemptAt": engine.ts(T0 + timedelta(hours=1))}
     new = make_req("b", pvc="other", uid="bbbbbbbb1")
-    later = T0 + timedelta(seconds=cfg.ADMISSION_DELAY + 60)  # grace period over, a still backing off
+    later = T0 + timedelta(minutes=5)  # a is still backing off
     assert engine.reconcile(running, kube, adm, later) is None
     apply(new, engine.reconcile(new, kube, adm, later))
     assert new["status"]["reason"] == "Queued" and kube.created["snapshot"] == []
 
 
 def test_bootstrap_registers_active_runs():
-    adm = engine.Admission(started_at=T0)
+    adm = engine.Admission()
     running = make_req("a", uid="aaaaaaaa1")
     running["status"] = {"phase": "CleaningUp"}
     adm.bootstrap([running, make_req("b", uid="bbbbbbbb1")])
@@ -250,3 +249,19 @@ def test_rate_limiter_bounds_aggregate_calls():
     for _ in range(110):
         lim.acquire()
     assert clock[0] == pytest.approx(20.0, rel=0.01)  # 10 burst + 100 at 5/s
+
+
+def test_no_admission_until_bootstrap_succeeds(kube, monkeypatch):
+    """Bootstrap failed: a pending request reconciled before the active one must stay queued, forever."""
+    monkeypatch.setattr(cfg, "MAX_CONCURRENT_RUNS", 1)
+    adm = engine.Admission()
+    new = make_req("b", pvc="other", uid="bbbbbbbb1")
+    for minutes in (1, 10, 600):
+        apply(new, engine.reconcile(new, kube, adm, T0 + timedelta(minutes=minutes)))
+        assert new["status"]["reason"] == "Queued"
+    assert kube.calls == 0
+    running = make_req("a", uid="aaaaaaaa1")
+    running["status"] = {"phase": "Running"}
+    adm.bootstrap([running, new])
+    apply(new, engine.reconcile(new, kube, adm, T0 + timedelta(hours=11)))
+    assert new["status"]["reason"] == "Queued" and "Concurrency limit" in new["status"]["message"]
