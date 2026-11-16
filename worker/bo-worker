@@ -96,30 +96,49 @@ backup() {
     if [[ -f $OUTPUT_DIR/.backup-excludes ]]; then cat "$OUTPUT_DIR/.backup-excludes"; fi
   } > "$excludes"
 
+  # Snapshots are created without the "complete" tag; only a snapshot that was stored fully (and
+  # verified, if requested) gets it. Restore "latest" and retention only ever select complete snapshots.
+  local host=${BACKUP_HOST:-backup-operator}
   log "storing snapshot"
   local out=/tmp/backup.json rc=0
-  restic "${RARGS[@]}" backup --json --host "${BACKUP_HOST:-backup-operator}" \
+  restic "${RARGS[@]}" backup --json --host "$host" \
       --tag "source=$BACKUP_SOURCE" --tag "request=${BACKUP_REQUEST:-manual}" \
       --files-from-verbatim "$list" --exclude-file "$excludes" > "$out" || rc=$?
+  local summary id=""
+  summary=$(jq -c 'select(.message_type == "summary")' "$out" 2>/dev/null | tail -n1 || true)
+  [[ -n $summary ]] && id=$(jq -r '.snapshot_id // empty' <<< "$summary")
   if [[ $rc -eq 3 && ${ALLOW_PARTIAL:-false} != true ]]; then
-    fail "some files could not be read; snapshot is incomplete (exit 3)"
+    discard "$id"; fail "some files could not be read; snapshot is incomplete (exit 3)"
   elif [[ $rc -ne 0 && $rc -ne 3 ]]; then
-    fail "restic backup failed (exit $rc)"
+    discard "$id"; fail "restic backup failed (exit $rc)"
   fi
-  local summary id
-  summary=$(jq -c 'select(.message_type == "summary")' "$out" | tail -n1)
-  [[ -n $summary ]] || fail "restic produced no summary"
-  id=$(jq -r '.snapshot_id' <<< "$summary")
+  [[ -n $id ]] || fail "restic produced no summary"
   restic "${RARGS[@]}" snapshots --json "$id" | jq -e 'length == 1' >/dev/null || fail "snapshot $id not found after backup"
 
   local verified=false
   if [[ ${VERIFY:-false} == true ]]; then
     log "verifying repository data (${VERIFY_SUBSET:-5%})"
-    restic "${RARGS[@]}" check --read-data-subset="${VERIFY_SUBSET:-5%}" >/dev/null || fail "repository check failed"
+    restic "${RARGS[@]}" check --read-data-subset="${VERIFY_SUBSET:-5%}" >/dev/null \
+      || { discard "$id"; fail "repository check failed"; }
     verified=true
   fi
 
-  # Retention runs only after a successful backup, so the newest good snapshot is always kept.
+  # Mark complete. Tagging rewrites the snapshot, so look the final ID up by its unique request tag.
+  restic "${RARGS[@]}" tag --add complete "$id" >/dev/null || { discard "$id"; fail "could not mark the snapshot complete"; }
+  id=$(restic "${RARGS[@]}" snapshots --json --host "$host" \
+        --tag "source=$BACKUP_SOURCE,request=${BACKUP_REQUEST:-manual},complete" | jq -r 'max_by(.time).id // empty')
+  [[ -n $id ]] || fail "completed snapshot not found"
+
+  # Leftovers of failed runs for this source (no "complete" tag) are removed; they were never restorable.
+  restic "${RARGS[@]}" snapshots --json --host "$host" --tag "source=$BACKUP_SOURCE" \
+    | jq -r '.[] | select((.tags // []) | index("complete") | not) | .id' > /tmp/incomplete || true
+  if [[ -s /tmp/incomplete ]]; then
+    log "removing $(wc -l < /tmp/incomplete) incomplete snapshot(s)"
+    xargs -r restic "${RARGS[@]}" forget < /tmp/incomplete >/dev/null || log "could not remove incomplete snapshots"
+  fi
+
+  # Retention runs only after a successful backup and only over complete snapshots, so the newest good
+  # snapshot is always kept.
   local retention='null' policy=()
   if [[ -n ${KEEP_LAST:-} ]]; then policy+=(--keep-last "$KEEP_LAST"); fi
   if [[ -n ${KEEP_DAILY:-} ]]; then policy+=(--keep-daily "$KEEP_DAILY"); fi
@@ -128,17 +147,18 @@ backup() {
   if [[ ${#policy[@]} -gt 0 ]]; then
     log "applying retention ${policy[*]}"
     local fj=/tmp/forget.json
-    restic "${RARGS[@]}" forget --json --group-by host --host "${BACKUP_HOST:-backup-operator}" \
-        --tag "source=$BACKUP_SOURCE" "${policy[@]}" > "$fj" || fail "retention (forget) failed"
+    restic "${RARGS[@]}" forget --json --group-by host --host "$host" \
+        --tag "source=$BACKUP_SOURCE,complete" "${policy[@]}" > "$fj" || fail "retention (forget) failed"
     retention=$(jq -c '{kept: ([.[].keep[]?.short_id] | .[:200]), removed: ([.[].remove[]?] | length)}' "$fj")
-    if [[ $(jq -r .removed <<< "$retention") -gt 0 ]]; then
-      restic "${RARGS[@]}" prune >/dev/null || fail "retention (prune) failed"
-    fi
+  fi
+  if [[ -s /tmp/incomplete || $(jq -r '.removed // 0' <<< "$retention") -gt 0 ]]; then
+    restic "${RARGS[@]}" prune >/dev/null || fail "retention (prune) failed"
   fi
 
   local result
-  result=$(jq -c --arg plugin "${PLUGIN:-files}" --argjson verified "$verified" --argjson retention "$retention" '{
-      plugin: $plugin, snapshotId: .snapshot_id, shortId: .snapshot_id[0:8],
+  result=$(jq -c --arg id "$id" --arg plugin "${PLUGIN:-files}" --argjson verified "$verified" \
+      --argjson retention "$retention" '{
+      plugin: $plugin, snapshotId: $id, shortId: $id[0:8],
       filesNew: .files_new, filesChanged: .files_changed, filesUnmodified: .files_unmodified,
       bytesAdded: .data_added, totalFiles: .total_files_processed, totalBytes: .total_bytes_processed,
       verified: $verified, retention: $retention}' <<< "$summary")
@@ -146,16 +166,27 @@ backup() {
   log "done: snapshot ${id:0:8}"
 }
 
+# Best effort: drop a snapshot of a failed run right away (it is never tagged complete either way).
+discard() {
+  [[ -n ${1:-} ]] || return 0
+  restic "${RARGS[@]}" forget "$1" >/dev/null 2>&1 || log "could not discard incomplete snapshot ${1:0:8}"
+}
+
 # Restore layout: /source holds the volume's files; /output/volume holds plugin-made copies (e.g. consistent
 # SQLite databases) that belong at the same relative paths and are laid over the volume files.
 restore() {
   : "${RESTORE_TARGET:?RESTORE_TARGET is required}"
   setup_repository
-  local snap=${RESTORE_SNAPSHOT:-latest} filter=()
-  if [[ $snap == latest && -n ${BACKUP_SOURCE:-} ]]; then filter=(--tag "source=$BACKUP_SOURCE"); fi
-  local id
-  id=$(restic "${RARGS[@]}" snapshots --json --latest 1 "${filter[@]}" ${snap/#latest/} | jq -r '.[-1].id // empty')
-  [[ -n $id ]] || fail "snapshot $snap not found"
+  local snap=${RESTORE_SNAPSHOT:-latest} id
+  if [[ $snap == latest ]]; then
+    # The full source identity: namespace (host) and source name, complete snapshots only.
+    [[ -n ${BACKUP_SOURCE:-} && -n ${BACKUP_HOST:-} ]] || fail "restoring latest needs BACKUP_SOURCE and BACKUP_HOST"
+    id=$(restic "${RARGS[@]}" snapshots --json --host "$BACKUP_HOST" --tag "source=$BACKUP_SOURCE,complete" \
+          | jq -r 'max_by(.time).id // empty')
+  else
+    id=$(restic "${RARGS[@]}" snapshots --json "$snap" | jq -r '.[0] | select((.tags // []) | index("complete")) | .id // empty')
+  fi
+  [[ -n $id ]] || fail "no complete snapshot found for $snap"
   local restored=0 sub
   for sub in "${RESTORE_SUBPATH:-/source}" "$OUTPUT_DIR/volume"; do
     if restic "${RARGS[@]}" ls "$id" "$sub" >/dev/null 2>&1 && [[ -n $(restic "${RARGS[@]}" ls --json "$id" "$sub" | jq -r 'select(.path != null) | .path' | head -n1) ]]; then

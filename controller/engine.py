@@ -446,7 +446,8 @@ def _sync_records_with_retention(req: Req, kube, current: str, stored: dict) -> 
         st, spec = rec.get("status") or {}, rec.get("spec") or {}
         short = (st.get("artifact") or {}).get("shortId")
         if (rec["metadata"]["name"] != current and st.get("phase") == "Succeeded" and short
-                and short not in kept and spec.get("repository") == repo and spec.get("source") == req.source):
+                and short not in kept and spec.get("repository") == repo and spec.get("source") == req.source
+                and spec.get("sourceNamespace") == req.src_ns):  # same scope as the worker: host = namespace
             log.info("%s: removing record %s (snapshot %s pruned by retention)", req.key, rec["metadata"]["name"], short)
             kube.delete_cr("backups", req.namespace, rec["metadata"]["name"], rec["metadata"].get("uid"))
 

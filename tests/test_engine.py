@@ -636,18 +636,20 @@ def test_missing_dependencies_fail_terminally_before_the_job(kube, adm, spec, re
 
 
 def test_records_follow_restic_retention(kube, adm):
-    def record(name, short, repo="s3:https://s3.example/bucket", source="data"):
+    def record(name, short, repo="s3:https://s3.example/bucket", source="data", src_ns="app"):
         kube.objs["backups"][("app", name)] = {
             "metadata": {"name": name, "uid": f"u-{name}", "labels": {
                 "app.kubernetes.io/managed-by": "backup-operator", "backup.techmonkeys.se/source": source}},
-            "spec": {"source": source, "repository": repo},
+            "spec": {"source": source, "repository": repo, "sourceNamespace": src_ns},
             "status": {"phase": "Succeeded", "artifact": {"shortId": short}}}
     record("old1", "aaaa0001")
     record("old2", "aaaa0002")
     record("other-repo", "aaaa0003", repo="s3:https://elsewhere/b")
+    record("other-ns", "aaaa0004", src_ns="other")
     kube.termination_message = ('{"shortId": "bbbb0001", "retention": {"kept": ["bbbb0001", "aaaa0002"], '
                                 '"removed": 1}}')
     body = make_req()
     run([body], kube, adm, T0)
     names = sorted(n for (_, n) in kube.objs["backups"])
-    assert names == ["old2", "other-repo", "r1"]  # old1's snapshot was pruned; other repositories untouched
+    # old1's snapshot was pruned; other repositories and other source namespaces are out of scope
+    assert names == ["old2", "other-ns", "other-repo", "r1"]

@@ -28,7 +28,8 @@ spec:
           env:
             - {name: RESTIC_REPOSITORY, value: "s3:https://s3.example.com/backups/my-app"}
             - {name: BACKUP_SOURCE, value: my-app-data}      # schedule name (or PVC name for ad-hoc runs)
-            - {name: RESTORE_SNAPSHOT, value: latest}        # or a snapshot ID
+            - {name: BACKUP_HOST, value: my-app}             # namespace of the backed-up volume
+            - {name: RESTORE_SNAPSHOT, value: latest}        # newest complete snapshot, or a snapshot ID
             - {name: RESTORE_TARGET, value: /restore}
           # Restoring writes files and restores their original owners, so it needs more than a backup.
           securityContext:

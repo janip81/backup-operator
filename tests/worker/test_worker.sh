@@ -32,7 +32,8 @@ worker() {
   while [[ $# -gt 0 && $1 != -- ]]; do envs+=(-e "$1"); shift; done
   [[ ${1:-} == -- ]] && shift
   # backups only read (DAC_READ_SEARCH); restores write into existing trees and restore ownership
-  local caps=(--cap-add DAC_READ_SEARCH)
+  local caps=(--cap-add DAC_READ_SEARCH) extra=()
+  if [[ ${NO_READ_CAP:-} == 1 ]]; then caps=(); fi   # simulate files the worker can't read
   [[ ${1:-} == restore ]] && caps+=(--cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE)
   rm -f -- "$tmp/term/msg"
   docker run --rm --read-only --tmpfs /tmp --tmpfs /output --user 0 --cap-drop ALL "${caps[@]}" \
@@ -40,7 +41,7 @@ worker() {
     -v "$src:/source:ro" -v "$repo:/repo" -v "$tmp/creds:/etc/backup/creds:ro" -v "$tmp/term:/term" \
     -v "$restore_vol:/restore" \
     -e RESTIC_REPOSITORY=/repo -e TERMINATION_LOG=/term/msg -e BACKUP_SOURCE=test -e BACKUP_HOST=app \
-    "${envs[@]}" "$IMG" "$@"
+    "${extra[@]}" "${envs[@]}" "$IMG" "$@"
 }
 # the worker writes the message root-only (umask 077), as in a pod; read it through a container
 msg() { docker run --rm --user 0 -v "$tmp/term:/term:ro" --entrypoint sh "$IMG" -c 'cat /term/msg 2>/dev/null || true'; }
@@ -100,6 +101,28 @@ ok "pruned snapshot is gone"
 worker "$src" RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore latest"; }
 [[ $(restored_hashes) == "$h2" ]] || die "restore of latest differs"
 ok "restore of latest matches"
+
+# a partial backup (unreadable file) fails and never becomes "latest" or a retention candidate
+chmod 0600 "$src/private.txt"; echo "changed" >> "$src/private.txt"; chmod 0000 "$src/private.txt"  # must be re-read
+chmod 0644 "$tmp/creds/RESTIC_PASSWORD"   # without the capability, only the 0000 source file is unreadable
+NO_READ_CAP=1 worker "$src" PLUGIN=files -- backup >/dev/null 2>&1 && die "partial backup accepted"
+chmod 0600 "$tmp/creds/RESTIC_PASSWORD"
+[[ $(msg | jq -r .error) == *"incomplete"* ]] || die "partial error: $(msg)"
+reset_restore
+worker "$src" RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore after partial"; }
+[[ $(restored_hashes) == "$h2" ]] || die "latest after a partial backup is not the last complete snapshot"
+ok "partial backup fails and is never selected as latest"
+
+# same source name in another namespace (host) in the same repository: restores stay separate
+other=$tmp/other; mkdir -p "$other"; echo "other namespace" > "$other/x.txt"
+worker "$other" BACKUP_HOST=ns2 -- backup >/dev/null 2>&1 || { msg; die "ns2 backup"; }
+reset_restore
+worker "$src" RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore app"; }
+[[ $(restored_hashes) == "$h2" ]] || die "restore of latest picked another namespace's data"
+reset_restore
+worker "$src" BACKUP_HOST=ns2 RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore ns2"; }
+[[ $(restored_hashes) == "$(host_hashes "$other")" ]] || die "restore of ns2 differs"
+ok "same source name in two namespaces restores separately"
 
 worker "$src" PLUGIN=files PLUGIN_PATHS=dir/../.. -- backup >/dev/null 2>&1 && die "path traversal accepted"
 ok "path traversal in plugin config is refused"
