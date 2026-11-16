@@ -34,6 +34,7 @@ When finished:
 - **PRs to `main`:** lint (`ruff`), tests (`pytest`) and both image builds run. Nothing is pushed.
 - **Pushes to `main`/`develop`:** the same checks run, then images are pushed with the branch name and `sha-<commit>` tags. Pushes that change only Markdown or `docs/**` are skipped.
 - **Version tags `vX.Y.Z`:** images are pushed as `X.Y.Z`, `X.Y` and `latest`.
+- `X.Y.Z` and `sha-<commit>` tags are never overwritten: the workflow fails if they already exist. Deploy those (or digests), not branch tags.
 
 ---
 
