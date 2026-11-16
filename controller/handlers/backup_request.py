@@ -23,13 +23,20 @@ def reconcile_request(body, patch, logger, **_):
         logger.debug(f"status -> {status_patch.get('phase', '(unchanged phase)')}: {status_patch.get('message', '')}")
 
 
-@kopf.on.delete(cfg.GROUP, cfg.VERSION, "backuprequests", backoff=15, timeout=3600)
-def cleanup_on_delete(body, logger, **_):
-    """Finalizer: a deleted request removes every temporary object any of its attempts created.
-    Waits (bounded by the handler timeout) until they are gone, then releases admission."""
+CLEANUP_GIVE_UP = 3600  # seconds
+
+
+@kopf.on.delete(cfg.GROUP, cfg.VERSION, "backuprequests", backoff=15)
+def cleanup_on_delete(body, logger, runtime, **_):
+    """Finalizer: a deleted request removes every temporary object any of its attempts created and
+    waits until they are gone. After CLEANUP_GIVE_UP seconds it stops waiting explicitly (so the
+    request can go away); leftovers keep their ownership labels and stay visible to the snapshot
+    metrics and alerts."""
     req = engine.Req.from_body(dict(body))
     remaining = engine.cleanup_all(req, kube())
-    if remaining:
+    if remaining and runtime.total_seconds() < CLEANUP_GIVE_UP:
         raise kopf.TemporaryError(f"Waiting for cleanup of: {', '.join(remaining)}", delay=15)
+    if remaining:
+        logger.error(f"Giving up waiting for cleanup after {CLEANUP_GIVE_UP}s; left behind: {', '.join(remaining)}")
     ADMISSION.release(req.key)
     logger.info("Temporary objects removed")

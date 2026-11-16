@@ -66,6 +66,9 @@ spec:
                 minimum: 1
                 maximum: 10
                 description: 'Attempts before the request is marked Failed (default: operator DEFAULT_MAX_ATTEMPTS).'
+            x-kubernetes-validations:
+            - rule: self == oldSelf
+              message: spec is immutable; create a new BackupRequest instead
           status:
             type: object
             description: Observed state, written by the operator.
@@ -135,6 +138,9 @@ spec:
                     type: string
                   configMap:
                     type: string
+              sourceNamespace:
+                type: string
+                description: Source namespace recorded at first admission; used for all cleanup.
     subresources:
       status: {}
     additionalPrinterColumns:

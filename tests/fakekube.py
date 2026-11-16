@@ -37,13 +37,18 @@ class FakeKube:
         self._tick()
         key = (ns, body["metadata"]["name"])
         if key not in self.objs[kind]:
+            self.uid_seq = getattr(self, "uid_seq", 0) + 1
             self.objs[kind][key] = copy.deepcopy(body)
+            self.objs[kind][key]["metadata"]["uid"] = f"uid-{self.uid_seq}"
             self.created[kind].append(key[1])
         live = len(self.objs["snapshot"])
         self.max_live_snapshots = max(self.max_live_snapshots, live)
 
-    def _delete(self, kind, ns, name):
+    def _delete(self, kind, ns, name, uid=None):
         self._tick()
+        o = self.objs[kind].get((ns, name))
+        if o is not None and uid and (o.get("metadata") or {}).get("uid") != uid:
+            return  # UID precondition failed (409): a different object now has this name
         self.objs[kind].pop((ns, name), None)
 
     def add_source_pvc(self, ns, name, phase="Bound"):
@@ -72,8 +77,8 @@ class FakeKube:
     def create_pvc(self, ns, body):
         self._create("pvc", ns, body)
 
-    def delete_pvc(self, ns, name):
-        self._delete("pvc", ns, name)
+    def delete_pvc(self, ns, name, uid=None):
+        self._delete("pvc", ns, name, uid)
 
     def get_storage_class(self, name):
         self._tick()
@@ -85,8 +90,8 @@ class FakeKube:
     def create_snapshot(self, ns, body):
         self._create("snapshot", ns, body)
 
-    def delete_snapshot(self, ns, name):
-        self._delete("snapshot", ns, name)
+    def delete_snapshot(self, ns, name, uid=None):
+        self._delete("snapshot", ns, name, uid)
 
     def list_snapshots(self, ns, selector):
         self._tick()
@@ -100,8 +105,8 @@ class FakeKube:
     def create_job(self, ns, body):
         self._create("job", ns, body)
 
-    def delete_job(self, ns, name):
-        self._delete("job", ns, name)
+    def delete_job(self, ns, name, uid=None):
+        self._delete("job", ns, name, uid)
 
     def get_secret(self, ns, name):
         self._tick()
@@ -112,8 +117,8 @@ class FakeKube:
     def create_secret(self, ns, body):
         self._create("secret", ns, body)
 
-    def delete_secret(self, ns, name):
-        self._delete("secret", ns, name)
+    def delete_secret(self, ns, name, uid=None):
+        self._delete("secret", ns, name, uid)
 
     def get_configmap(self, ns, name):
         self._tick()
@@ -124,8 +129,8 @@ class FakeKube:
     def create_configmap(self, ns, body):
         self._create("configMap", ns, body)
 
-    def delete_configmap(self, ns, name):
-        self._delete("configMap", ns, name)
+    def delete_configmap(self, ns, name, uid=None):
+        self._delete("configMap", ns, name, uid)
 
     def list_owned(self, kind, ns, selector):
         self._tick()
@@ -134,8 +139,8 @@ class FakeKube:
                 if n == ns and all(((o.get("metadata") or {}).get("labels") or {}).get(k) == v
                                    for k, v in want.items())]
 
-    def delete(self, kind, ns, name):
-        self._delete(kind, ns, name)
+    def delete(self, kind, ns, name, uid=None):
+        self._delete(kind, ns, name, uid)
 
     def create_cr(self, plural, ns, body):
         self._create(plural, ns, body)

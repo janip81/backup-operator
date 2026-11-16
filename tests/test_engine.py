@@ -328,3 +328,25 @@ def test_reconcile_skips_requests_being_deleted(kube, adm):
     body = make_req()
     body["metadata"]["deletionTimestamp"] = engine.ts(T0)
     assert engine.reconcile(body, kube, adm, T0) is None and kube.calls == 0
+
+
+def test_cleanup_never_deletes_a_replacement_with_the_same_name(kube):
+    req = engine.Req.from_body(make_req(uid="aaaaaaaa1"))
+    name = req.names()["configMap"]
+    kube.objs["configMap"][("app", name)] = {"metadata": {"name": name, "uid": "old", "labels": req.labels()}}
+    listed = kube.list_owned("configMap", "app", req.selector())
+    # between list and delete, the owned object is replaced by a foreign one with the same name
+    kube.objs["configMap"][("app", name)] = {"metadata": {"name": name, "uid": "new", "labels": {}}}
+    kube.delete("configMap", "app", name, listed[0]["metadata"]["uid"])
+    assert kube.objs["configMap"][("app", name)]["metadata"]["uid"] == "new"
+
+
+def test_cleanup_uses_recorded_source_namespace(kube):
+    body = make_req(uid="aaaaaaaa1", sourceNamespace="a-ns")
+    body["status"] = {"sourceNamespace": "a-ns", "attempt": 1}
+    req = engine.Req.from_body(body)
+    name = req.names()["job"]
+    kube.objs["job"][("a-ns", name)] = {"metadata": {"name": name, "uid": "j", "labels": req.labels()}}
+    body["spec"]["sourceNamespace"] = "b-ns"  # (rejected by the CRD; cleanup must not follow it anyway)
+    assert engine.cleanup_all(engine.Req.from_body(body), kube) == [name]
+    assert ("a-ns", name) not in kube.objs["job"]

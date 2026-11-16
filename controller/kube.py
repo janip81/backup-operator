@@ -85,8 +85,16 @@ class Kube:
     def create_pvc(self, ns: str, body: dict) -> None:
         self._call(self.core.create_namespaced_persistent_volume_claim, ns, body, ok_status=(409,))
 
-    def delete_pvc(self, ns: str, name: str) -> None:
-        self._call(self.core.delete_namespaced_persistent_volume_claim, name, ns, ok_status=(404,))
+    @staticmethod
+    def _opts(uid: str | None, **kw) -> dict:
+        """Delete options; with a UID precondition the API refuses to delete a different object
+        that has since taken the same name (409), so cleanup can never remove a replacement (#10)."""
+        body = client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid) if uid else None, **kw)
+        return {"body": body}
+
+    def delete_pvc(self, ns: str, name: str, uid: str | None = None) -> None:
+        self._call(self.core.delete_namespaced_persistent_volume_claim, name, ns, ok_status=(404, 409),
+                   **self._opts(uid))
 
     def get_storage_class(self, name: str) -> dict | None:
         return self._dict(self._call(self.storage.read_storage_class, name, ok_status=(404,)))
@@ -99,10 +107,10 @@ class Kube:
         self._call(self.custom.create_namespaced_custom_object, SNAP_GROUP, SNAP_VERSION, ns, SNAP_PLURAL, body,
                    ok_status=(409,))
 
-    def delete_snapshot(self, ns: str, name: str) -> None:
+    def delete_snapshot(self, ns: str, name: str, uid: str | None = None) -> None:
         # Normal delete only. Finalizers are never removed: that would leave the snapshot behind in the backend.
         self._call(self.custom.delete_namespaced_custom_object, SNAP_GROUP, SNAP_VERSION, ns, SNAP_PLURAL, name,
-                   ok_status=(404,))
+                   ok_status=(404, 409), **self._opts(uid))
 
     def list_snapshots(self, ns: str, selector: str) -> list[dict]:
         res = self._call(self.custom.list_namespaced_custom_object, SNAP_GROUP, SNAP_VERSION, ns, SNAP_PLURAL,
@@ -115,8 +123,9 @@ class Kube:
     def create_job(self, ns: str, body: dict) -> None:
         self._call(self.batch.create_namespaced_job, ns, body, ok_status=(409,))
 
-    def delete_job(self, ns: str, name: str) -> None:
-        self._call(self.batch.delete_namespaced_job, name, ns, propagation_policy="Background", ok_status=(404,))
+    def delete_job(self, ns: str, name: str, uid: str | None = None) -> None:
+        self._call(self.batch.delete_namespaced_job, name, ns, ok_status=(404, 409),
+                   **self._opts(uid, propagation_policy="Background"))
 
     def list_job_pods(self, ns: str, job: str) -> list[dict]:
         res = self._call(self.core.list_namespaced_pod, ns, label_selector=f"job-name={job}")
@@ -128,8 +137,8 @@ class Kube:
     def create_secret(self, ns: str, body: dict) -> None:
         self._call(self.core.create_namespaced_secret, ns, body, ok_status=(409,))
 
-    def delete_secret(self, ns: str, name: str) -> None:
-        self._call(self.core.delete_namespaced_secret, name, ns, ok_status=(404,))
+    def delete_secret(self, ns: str, name: str, uid: str | None = None) -> None:
+        self._call(self.core.delete_namespaced_secret, name, ns, ok_status=(404, 409), **self._opts(uid))
 
     def get_configmap(self, ns: str, name: str) -> dict | None:
         return self._dict(self._call(self.core.read_namespaced_config_map, name, ns, ok_status=(404,)))
@@ -137,8 +146,8 @@ class Kube:
     def create_configmap(self, ns: str, body: dict) -> None:
         self._call(self.core.create_namespaced_config_map, ns, body, ok_status=(409,))
 
-    def delete_configmap(self, ns: str, name: str) -> None:
-        self._call(self.core.delete_namespaced_config_map, name, ns, ok_status=(404,))
+    def delete_configmap(self, ns: str, name: str, uid: str | None = None) -> None:
+        self._call(self.core.delete_namespaced_config_map, name, ns, ok_status=(404, 409), **self._opts(uid))
 
     # --- generic by kind (used by cleanup) ---
     def list_owned(self, kind: str, ns: str, selector: str) -> list[dict]:
@@ -149,9 +158,9 @@ class Kube:
         res = self._dict(self._call(fn, ns, label_selector=selector))
         return (res or {}).get("items", [])
 
-    def delete(self, kind: str, ns: str, name: str) -> None:
+    def delete(self, kind: str, ns: str, name: str, uid: str | None = None) -> None:
         {"job": self.delete_job, "pvc": self.delete_pvc, "snapshot": self.delete_snapshot,
-         "secret": self.delete_secret, "configMap": self.delete_configmap}[kind](ns, name)
+         "secret": self.delete_secret, "configMap": self.delete_configmap}[kind](ns, name, uid)
 
     # --- operator CRs ---
     def create_cr(self, plural: str, ns: str, body: dict) -> None:

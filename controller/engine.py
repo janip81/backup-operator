@@ -131,7 +131,8 @@ class Req:
 
     @property
     def src_ns(self) -> str:
-        return self.spec.get("sourceNamespace") or self.namespace
+        # Recorded at first admission; the spec is immutable too, but cleanup must never follow a changed spec.
+        return self.status.get("sourceNamespace") or self.spec.get("sourceNamespace") or self.namespace
 
     @property
     def src_pvc(self) -> str:
@@ -279,6 +280,7 @@ def _start_attempt(req: Req, kube, admission: Admission, now: datetime) -> dict 
 
     backup_total.labels(namespace=req.src_ns, method=req.spec.get("transferMethod", "rsync")).inc()
     patch = {"phase": "Snapshotting", "phaseStartedAt": ts(now), "attempt": req.attempt,
+             "sourceNamespace": req.src_ns,
              "maxAttempts": req.max_attempts, "resources": req.names(), "reason": "Snapshotting",
              "message": f"Attempt {req.attempt}/{req.max_attempts}: creating snapshot", "outcome": None}
     if not req.status.get("startedAt"):
@@ -378,7 +380,7 @@ def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict |
             continue  # gone, or not ours: never delete objects this request didn't create
         remaining.append(n[kind])
         if not (obj.get("metadata") or {}).get("deletionTimestamp"):
-            deleter(ns, n[kind])
+            deleter(ns, n[kind], obj["metadata"].get("uid"))
     if remaining:
         if _phase_timed_out(req, now, cfg.CLEANUP_TIMEOUT):
             msg = f"Cleanup still waiting for: {', '.join(remaining)}"
@@ -399,7 +401,7 @@ def cleanup_all(req: Req, kube) -> list[str]:
             name = obj["metadata"]["name"]
             remaining.append(name)
             if not obj["metadata"].get("deletionTimestamp"):
-                kube.delete(kind, req.src_ns, name)
+                kube.delete(kind, req.src_ns, name, obj["metadata"].get("uid"))
     return remaining
 
 
