@@ -478,7 +478,8 @@ def sanitize_artifact(raw: dict) -> dict:
         out["error"] = raw["error"]
     ret = raw.get("retention")
     if isinstance(ret, dict):
-        kept = [k for k in ret.get("kept") or [] if isinstance(k, str) and _HEX.match(k)][:200]
+        raw_kept = ret.get("kept")
+        kept = [k for k in raw_kept if isinstance(k, str) and _HEX.match(k)][:200] if isinstance(raw_kept, list) else []
         removed = ret.get("removed")
         if isinstance(removed, int) and not isinstance(removed, bool) and removed >= 0:
             out["retention"] = {"kept": kept, "removed": removed}

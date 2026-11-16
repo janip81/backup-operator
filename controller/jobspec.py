@@ -78,6 +78,11 @@ def validate_repository(req) -> None:
                             "and put credentials in the Secret", terminal=True)
 
 
+def _safe_url(req) -> str | None:
+    url = (req.spec.get("repository") or {}).get("url") or ""
+    return url if REPO_URL.match(url) else None
+
+
 def ensure_dependencies(req, n: dict, kube) -> None:
     """Validate what the worker will mount from the source namespace. Nothing is copied (#10, #13):
     the credentials Secret and a custom plugin's ConfigMap are owned by the application namespace."""
@@ -209,5 +214,6 @@ def backup_record(req, name: str) -> dict:
         "spec": {"requestRef": {"name": req.name, "namespace": req.namespace, "uid": req.uid},
                  "source": req.source, "sourceNamespace": req.src_ns, "sourcePVC": req.src_pvc,
                  "plugin": _plugin(req).get("name", "files"),
-                 "repository": (req.spec.get("repository") or {}).get("url")},  # validated: no credentials
+                 # only a validated URL is ever stored (never one that could carry credentials)
+                 "repository": _safe_url(req)},
     }

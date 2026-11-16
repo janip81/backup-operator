@@ -108,3 +108,23 @@ def test_non_root_mode_can_read_credentials():
     assert pod["securityContext"]["fsGroup"] == 2000
     creds = next(v for v in pod["volumes"] if v["name"] == "creds")
     assert creds["secret"]["defaultMode"] == 0o440
+
+
+@pytest.mark.parametrize("retention", [{"kept": 5, "removed": 1}, {"kept": "abababab", "removed": 1},
+                                       {"kept": None, "removed": "1"}, "x", [1]])
+def test_malformed_artifact_never_raises(retention):
+    out = engine.sanitize_artifact({"retention": retention, "shortId": "abababab"})
+    assert out["shortId"] == "abababab"
+    assert out.get("retention", {"kept": []})["kept"] == []
+
+
+@pytest.mark.parametrize("pvc", ["data", "nope"])  # validation failure, and a failure before validation
+def test_failure_records_never_store_an_invalid_url(pvc):
+    kube = FakeKube()
+    kube.add_source_pvc("app", "data")
+    bad = "s3:https://key:" + CANARY + "@s3.example.com/b"
+    body = make_req(pvc=pvc, maxAttempts=1, repository={"url": bad, "credentialsSecret": "creds"})
+    run([body], kube, engine.Admission(ready=True), T0)
+    rec = kube.objs["backups"][("app", "r1")]
+    assert rec["status"]["phase"] == "Failed" and rec["spec"].get("repository") is None
+    assert CANARY not in repr(rec) + repr(body["status"])
