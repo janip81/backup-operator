@@ -31,7 +31,7 @@ When finished:
 
 ## 🧪 Testing Workflows
 
-- GitHub Actions builds and pushes images on pushes to `main` and `develop` and on `v*.*.*` tags.
+- GitHub Actions builds and pushes images on pushes to `main` and `develop` and on `v*.*.*` tags. Branch pushes that change only ignored paths (docs, manifests/YAML, `.github/**`, …; see `paths-ignore` in the workflow) don't trigger a build.
 - PRs are **not** built yet, and the workflow has no manual trigger (tracked in #14). Build locally before opening a PR.
 
 ---

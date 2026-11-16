@@ -10,7 +10,7 @@ Designed to work seamlessly across namespaces and clusters.
 
 > **Status (2026-11):** paused for a reliability rework. Known problems with retries, cleanup, schedules,
 > retention and the build pipeline are tracked in [issues #8–#15](https://github.com/janip81/backup-operator/issues).
-> Don't use this in production until #8 is resolved.
+> Don't use this in production until all of #8–#15 are resolved.
 
 ---
 
@@ -107,12 +107,17 @@ spec:
 
 ## 🧰 Cleanup Behavior
 
-After successful or failed backups, temporary resources are removed automatically:
+> ⚠️ Cleanup is only reliable on the normal success path. When an unexpected error occurs (for example a
+> snapshot timeout or an API error), the handler records the failure and re-raises it **without cleaning up**,
+> and the retry starts again with new resource names. Temporary objects can therefore be left behind.
+> Being fixed in #8 and #10.
 
-- ✅ Snapshots deleted after job completion
-- ✅ Temporary PVCs and jobs removed
-- ✅ Copied secrets and ConfigMaps cleaned up
-- ✅ Status updated on BackupRequest CR
+On the normal path, the handler removes:
+
+- Snapshots after the job completes
+- Temporary PVCs and jobs
+- Copied secrets and ConfigMaps (these are shared per namespace; see #10)
+- and records the status on the BackupRequest CR
 
 Example logs:
 
@@ -132,12 +137,19 @@ Run locally (for debug):
 kopf run --standalone controller/__main__.py --verbose
 ```
 
-Deploy to cluster:
+Deploy to a **disposable test cluster** in stages. Don't run `kubectl apply -f k8s/manifests/` on the whole
+directory: it also applies the example BackupRequests (`06-`, `07-`), which start backups immediately.
 
 ```bash
 kubectl apply -f k8s/manifests/crds/
-kubectl apply -f k8s/manifests/
+kubectl apply -f k8s/manifests/00-namespace.yaml -f k8s/manifests/02-rbac.yaml \
+              -f k8s/manifests/03-configmap-scripts.yaml
+# create the image pull and SSH secrets yourself (see 01-ghcr-secret.sample.yaml)
+kubectl apply -f k8s/manifests/04-deployment.yaml      # starts the controller (replicas: 1)
+kubectl apply -f k8s/manifests/08-ServiceMonitor.yaml  # optional, needs Prometheus Operator
 ```
+
+Only create BackupRequests or BackupSchedules once the destination and the source PVC are verified.
 
 ---
 

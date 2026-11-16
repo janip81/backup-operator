@@ -9,11 +9,11 @@ IP addresses or real destination paths. Use placeholders such as `backup@nas.exa
 Kubernetes backup operator built with [kopf](https://kopf.readthedocs.io/) (Python).
 Images: `ghcr.io/janip81/backup-operator-{controller,worker}`.
 
-## Current status (2026-11-16)
+## Current status
 
-- **The operator is paused** (0 replicas) in the owner's cluster, and has been since 2026-03-24.
-  Don't scale it up or create BackupRequests in a live cluster without the owner's explicit approval.
-- The known problems are tracked as GitHub issues and must be resolved before re-enabling:
+- **The operator is paused and not production-ready.** Don't run it against a live cluster or create
+  BackupRequests there without the owner's explicit approval.
+- Known problems are tracked as GitHub issues, and **all** of them must be resolved before it is re-enabled:
   - #8 (P0): bound retries and API load
   - #9: idempotent schedules
   - #10: cleanup ownership
@@ -21,9 +21,8 @@ Images: `ghcr.io/janip81/backup-operator-{controller,worker}`.
   - #12: retention and versioned recovery points
   - #13: credential handling
   - #14: build pipeline and image provenance
-  - #15: GitOps deployment and schedule config
-- The image currently tagged `develop` contains an emergency fix from 2026-03 that was never committed
-  (see #14). Don't rebuild or overwrite `develop` until that has been resolved.
+  - #15: GitOps deployment and schedule configuration
+- Don't build or push the CI-owned image tags by hand (see #14).
 
 ## Repository layout
 
@@ -56,13 +55,14 @@ k8s/manifests/               namespace, RBAC, deployment, CRDs, script presets, 
 
 ## Hard-won lessons (do not regress)
 
-- **2026-03-12 etcd incident:** retries that left the previous snapshot behind built up to about 13,400
-  VolumeSnapshots. The snapshot controller's paginated listing then overloaded etcd and the API servers.
-  Any retry path must reuse or clean up its own resources and must be bounded (#8).
-- **The vSphere CSI driver allows at most 3 snapshots per volume.** Once a volume is at the limit,
-  `FailedPrecondition ... reaches the configured maximum` keeps occurring; retrying makes it worse.
-- **Never remove VolumeSnapshot finalizers by force.** That skips CSI `DeleteSnapshot` and leaves
-  snapshots behind in vSphere that Kubernetes can no longer see.
+- **Unbounded retries are dangerous.** A retry that creates new snapshots without removing the previous
+  attempt's can build up thousands of VolumeSnapshots and overload the API server and etcd.
+  Every retry path must reuse or clean up its own resources and must be bounded (#8).
+- **CSI drivers can cap snapshots per volume.** vSphere CSI, for example, has a configurable per-volume maximum
+  with a low default. Once a volume is at that maximum, `CreateSnapshot` keeps failing with `FailedPrecondition`.
+  Treat this as a terminal error, not something to retry.
+- **Never remove VolumeSnapshot finalizers by force.** That skips CSI `DeleteSnapshot` and leaves snapshots
+  behind in the storage backend that Kubernetes can no longer see.
 - Snapshot readiness is not application consistency. Apps that produce their own archives
   (e.g. Home Assistant) are the intended sources.
 
