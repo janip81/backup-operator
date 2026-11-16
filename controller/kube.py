@@ -171,6 +171,15 @@ class Kube:
         return self._call(self.custom.get_namespaced_custom_object, cfg.GROUP, cfg.VERSION, ns, plural, name,
                           ok_status=(404,))
 
+    def list_crs_ns(self, plural: str, ns: str, selector: str) -> list[dict]:
+        res = self._call(self.custom.list_namespaced_custom_object, cfg.GROUP, cfg.VERSION, ns, plural,
+                         label_selector=selector)
+        return (res or {}).get("items", [])
+
+    def delete_cr(self, plural: str, ns: str, name: str, uid: str | None = None) -> None:
+        self._call(self.custom.delete_namespaced_custom_object, cfg.GROUP, cfg.VERSION, ns, plural, name,
+                   ok_status=(404, 409), **self._opts(uid))
+
     def list_crs(self, plural: str) -> list[dict]:
         res = self._call(self.custom.list_cluster_custom_object, cfg.GROUP, cfg.VERSION, plural)
         return (res or {}).get("items", [])

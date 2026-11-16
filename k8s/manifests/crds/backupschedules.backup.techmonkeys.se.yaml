@@ -10,85 +10,142 @@ spec:
     plural: backupschedules
     singular: backupschedule
     shortNames:
-      - bks
+    - bks
   scope: Namespaced
   versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          description: BackupSchedule spawns BackupRequests on a cron schedule.
-          properties:
-            spec:
-              type: object
-              required:
-                - targetNamespace
-                - schedule
-              properties:
-                targetNamespace:
-                  type: string
-                  description: Namespace where backups will run.
-                schedule:
-                  type: string
-                  description: Cron expression for scheduling backups.
-                snapshotClass:
-                  type: string
-                storageClass:
-                  type: string
-                sourcePath:
-                  type: string
-                sourcePVC:
-                  type: string
-                remotePath:
-                  type: string
-                transferMethod:
-                  type: string
-                  description: rsync | scp | sftp
-                retention:
-                  type: integer
-                  description: Number of backups to retain.
-                customScript:
-                  type: object
-                  description: Optional custom script or preset for backups.
-                  properties:
-                    preset:
-                      type: string
-                    key:
-                      type: string
-                      default: backup.sh
-                    name:
-                      type: string
-                    namespace:
-                      type: string
-            status:
-              type: object
-              description: Current observed state of the schedule.
-              properties:
-                phase:
-                  type: string
-                  description: Current status phase of the schedule (e.g., Active, Failed).
-                lastRequest:
-                  type: string
-                  description: Name of the last BackupRequest triggered.
-                lastRunTime:
-                  type: string
-                  format: date-time
-                  description: Timestamp of the last backup run.
-                nextRunTime:
-                  type: string
-                  format: date-time
-                  description: Timestamp of the next scheduled run.
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: LastRun
-          type: date
-          jsonPath: .status.lastRunTime
-        - name: NextRun
-          type: date
-          jsonPath: .status.nextRunTime
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        required:
+        - spec
+        description: BackupSchedule creates one BackupRequest per cron tick.
+        properties:
+          spec:
+            type: object
+            required:
+            - schedule
+            - template
+            properties:
+              schedule:
+                type: string
+                description: Cron expression (5 fields), evaluated in timeZone.
+              timeZone:
+                type: string
+                description: IANA time zone for the cron expression (default UTC).
+              suspend:
+                type: boolean
+                default: false
+                description: Stop creating runs (active runs continue).
+              startingDeadlineSeconds:
+                type: integer
+                minimum: 60
+                description: A tick later than this (e.g. after operator downtime) is skipped, not run late. Only the latest
+                  missed tick is ever considered.
+              concurrencyPolicy:
+                type: string
+                enum:
+                - Forbid
+                - Allow
+                default: Forbid
+                description: Forbid skips a tick while a previous run of this schedule is active.
+              successfulHistoryLimit:
+                type: integer
+                minimum: 0
+                default: 3
+                description: Succeeded runs to keep. Applied each time a new run is created.
+              failedHistoryLimit:
+                type: integer
+                minimum: 0
+                default: 3
+                description: Failed runs to keep. Applied each time a new run is created.
+              template:
+                type: object
+                required:
+                - sourcePVC
+                - snapshotClass
+                - remotePath
+                properties:
+                  sourceNamespace:
+                    type: string
+                    description: Namespace of the source PVC. Defaults to the request's namespace.
+                  sourcePVC:
+                    type: string
+                  snapshotClass:
+                    type: string
+                  storageClass:
+                    type: string
+                    description: StorageClass for the temporary PVC. Defaults to the operator's DEFAULT_STORAGE_CLASS or the
+                      cluster default.
+                  remotePath:
+                    type: string
+                  sourcePath:
+                    type: string
+                  retention:
+                    type: integer
+                  transferMethod:
+                    type: string
+                    description: rsync | scp | sftp
+                  customScript:
+                    type: object
+                    description: Use script from ConfigMap or preset.
+                    properties:
+                      preset:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      key:
+                        type: string
+                        default: backup.sh
+                  maxAttempts:
+                    type: integer
+                    minimum: 1
+                    maximum: 10
+                    description: 'Attempts before the request is marked Failed (default: operator DEFAULT_MAX_ATTEMPTS).'
+                description: BackupRequest spec used for every run.
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                - Active
+                - Suspended
+              lastScheduleTime:
+                type: string
+                format: date-time
+                description: Latest tick that was decided (run or skipped).
+              nextScheduleTime:
+                type: string
+                format: date-time
+              lastRequest:
+                type: string
+              lastSkipped:
+                type: object
+                properties:
+                  time:
+                    type: string
+                    format: date-time
+                  reason:
+                    type: string
+              message:
+                type: string
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Schedule
+      type: string
+      jsonPath: .spec.schedule
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: Last
+      type: date
+      jsonPath: .status.lastScheduleTime
+    - name: Next
+      type: string
+      jsonPath: .status.nextScheduleTime

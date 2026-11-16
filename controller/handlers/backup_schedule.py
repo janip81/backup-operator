@@ -1,90 +1,13 @@
-import json
-import random
-import string
-from datetime import UTC, datetime
-
-import croniter
+"""kopf wiring for BackupSchedule (see controller/scheduling.py)."""
 import kopf
-import yaml
 
-from ..config import DEFAULT_STORAGE
+from .. import config as cfg
+from .. import scheduling
 from ..runtime import kube
 
 
-def rand_suffix(n=5):
-    return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
-
-
-@kopf.timer("backup.techmonkeys.se", "v1", "backupschedules", interval=60.0)
-def handle_schedule(spec, status, name, namespace, **_):
-    """
-    Periodically reconciles BackupSchedule objects and creates BackupRequest
-    when the cron schedule ticks.
-    """
-    schedule = spec.get("schedule")
-    target_ns = spec.get("targetNamespace")
-    src_pvc = spec.get("sourcePVC")
-    snapshot_class = spec.get("snapshotClass")
-    storage_class = spec.get("storageClass", DEFAULT_STORAGE)
-    source_path = spec.get("sourcePath", "")
-    remote_path = spec.get("remotePath")
-    method = spec.get("transferMethod", "rsync")
-    custom_script = spec.get("customScript", {"preset": "rsync-snapshot-default-backup-script"})
-    _retention = spec.get("retention", 7)  # not implemented yet (#12)
-
-    # Timestamps
-    now = datetime.now(UTC)
-    last_run_str = status.get("lastRunTime") if status else None
-    last_run = datetime.fromisoformat(last_run_str.replace("Z", "+00:00")) if last_run_str else None
-
-    # Compute next run using croniter
-    itr = croniter.croniter(schedule, last_run or now)
-    next_run = itr.get_next(datetime)
-
-    def fmt(dt):
-        if not dt:
-            return None
-        return dt.replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
-
-    next_run_str = fmt(next_run)
-    last_run_fmt = fmt(last_run)
-
-    patch = {"status": {"phase": "Active", "nextRunTime": next_run_str, "lastRunTime": last_run_fmt}}
-
-    # If it's time (or first run), trigger a BackupRequest
-    if last_run is None or now >= next_run:
-        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        suffix = rand_suffix()
-        req_name = f"{name}-{ts}-{suffix}"
-
-        print(f"[INFO] Triggering BackupRequest {req_name} from schedule {name}")
-
-        backup_req = f"""
-apiVersion: backup.techmonkeys.se/v1
-kind: BackupRequest
-metadata:
-  name: {req_name}
-  namespace: {namespace}
-spec:
-  sourceNamespace: {target_ns}
-  sourcePVC: {src_pvc}
-  sourcePath: {json.dumps(source_path)}
-  snapshotClass: {snapshot_class}
-  storageClass: {storage_class}
-  remotePath: {remote_path}
-  transferMethod: {method}
-  customScript:
-    preset: {custom_script.get('preset')}
-"""
-
-        kube().create_cr("backuprequests", namespace, yaml.safe_load(backup_req))
-
-        patch["status"].update(
-            {
-                "lastRequest": req_name,
-                "lastRunTime": fmt(now),
-                "nextRunTime": fmt(croniter.croniter(schedule, now).get_next(datetime)),
-            }
-        )
-
-    kube().patch_cr_status("backupschedules", namespace, name, patch["status"])
+@kopf.timer(cfg.GROUP, cfg.VERSION, "backupschedules", interval=cfg.SCHEDULE_TIMER_INTERVAL, sharp=False)
+def reconcile_schedule(body, patch, **_):
+    status_patch = scheduling.reconcile_schedule(dict(body), kube(), scheduling.now_utc())
+    for k, v in (status_patch or {}).items():
+        patch.status[k] = v

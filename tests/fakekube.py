@@ -160,6 +160,12 @@ class FakeKube:
             self.hooks["create_cr"](plural, ns, body)
         self._create(plural, ns, body)
 
+    def list_crs_ns(self, plural, ns, selector):
+        return self.list_owned(plural, ns, selector)
+
+    def delete_cr(self, plural, ns, name, uid=None):
+        self._delete(plural, ns, name, uid)
+
     def get_cr(self, plural, ns, name):
         return self._get(plural, ns, name)
 
