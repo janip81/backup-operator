@@ -74,7 +74,7 @@ Don't push by hand to the tags CI manages (`develop`, `latest`, `v*`); see #14.
    git tag -a v0.3.0 -m "Release v0.3.0"
    git push origin v0.3.0
    ```
-3. GitHub Actions builds and pushes the `vX.Y.Z` images (`latest` is published from `main` pushes only)
+3. GitHub Actions builds and pushes the `vX.Y.Z` images (`latest` is published from `main` pushes and from version tags)
 
 ---
 
