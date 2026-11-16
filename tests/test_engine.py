@@ -557,3 +557,27 @@ def test_status_write_is_conditional_on_verified_version(kube):
     with pytest.raises(TransientApiError):
         kube.patch_cr_status("backups", "app", "r1", {"phase": "Succeeded"}, resource_version="4")
     assert "status" not in kube.objs["backups"][("app", "r1")]
+
+
+def test_record_replaced_between_read_and_write_is_not_overwritten(kube, adm):
+    body = make_req()
+    now = _until(body, kube, adm, T0, "Recording")
+    for _ in range(2):  # choose name, create record
+        apply(body, engine.reconcile(body, kube, adm, now))
+        now += timedelta(seconds=10)
+    real_patch = kube.patch_cr_status
+
+    def replace_then_patch(plural, ns, name, status, resource_version=None):
+        kube.patch_cr_status = real_patch
+        kube.objs[plural][(ns, name)] = {"metadata": {"name": name, "resourceVersion": "777"},
+                                         "spec": {"requestRef": {"uid": "intruder"}}, "status": {"phase": "Failed"}}
+        real_patch(plural, ns, name, status, resource_version)
+
+    kube.patch_cr_status = replace_then_patch
+    for _ in range(4):
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        now += timedelta(minutes=10)
+        assert body["status"]["phase"] == "Recording"
+    rec = kube.objs["backups"][("app", "r1")]
+    assert rec["spec"]["requestRef"]["uid"] == "intruder" and rec["status"] == {"phase": "Failed"}
+    assert ("app", engine.Req.from_body(body).names()["job"]) in kube.objs["job"]  # no cleanup
