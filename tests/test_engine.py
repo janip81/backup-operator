@@ -183,3 +183,70 @@ def test_missing_source_pvc_fails_without_creating_anything(kube, adm):
 def test_retry_delay_is_capped_with_jitter():
     assert engine.retry_delay(1, rnd=lambda: 0.5) == cfg.RETRY_BASE_SECONDS
     assert engine.retry_delay(50, rnd=lambda: 1.0) == pytest.approx(cfg.RETRY_MAX_SECONDS * 1.2)
+
+
+# --- review round 1 (Codex): restart, cleanup outcome, queue load, rate limit ---
+
+def test_restart_running_request_in_backoff_still_counts(kube, monkeypatch):
+    monkeypatch.setattr(cfg, "MAX_CONCURRENT_RUNS", 1)
+    adm = engine.Admission(started_at=T0)
+    running = make_req("a", uid="aaaaaaaa1")
+    running["status"] = {"phase": "Running", "attempt": 1, "phaseStartedAt": engine.ts(T0),
+                         "nextAttemptAt": engine.ts(T0 + timedelta(hours=1))}
+    new = make_req("b", pvc="other", uid="bbbbbbbb1")
+    later = T0 + timedelta(seconds=cfg.ADMISSION_DELAY + 60)  # grace period over, a still backing off
+    assert engine.reconcile(running, kube, adm, later) is None
+    apply(new, engine.reconcile(new, kube, adm, later))
+    assert new["status"]["reason"] == "Queued" and kube.created["snapshot"] == []
+
+
+def test_bootstrap_registers_active_runs():
+    adm = engine.Admission(started_at=T0)
+    running = make_req("a", uid="aaaaaaaa1")
+    running["status"] = {"phase": "CleaningUp"}
+    adm.bootstrap([running, make_req("b", uid="bbbbbbbb1")])
+    assert adm.active_count() == 1
+
+
+@pytest.mark.parametrize("outcome,reason", [("succeeded", "CleaningUp"), ("failed", "SnapshotLimit")])
+def test_cleanup_outage_preserves_outcome(kube, adm, monkeypatch, outcome, reason):
+    monkeypatch.setattr(cfg, "API_ERROR_BUDGET", 2)
+    body = make_req(maxAttempts=3)
+    n = engine.Req.from_body(body).names()
+    kube.objs["snapshot"][("app", n["snapshot"])] = {"metadata": {"name": n["snapshot"]}}
+    body["status"] = {"phase": "CleaningUp", "attempt": 1, "outcome": outcome, "reason": reason,
+                      "phaseStartedAt": engine.ts(T0), "startedAt": engine.ts(T0)}
+    kube.fail_next = 50
+    now = T0
+    for _ in range(60):
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        assert body["status"]["outcome"] == outcome and body["status"]["attempt"] == 1
+        now += timedelta(minutes=10)
+        if body["status"]["phase"] in engine.TERMINAL:
+            break
+    assert body["status"]["phase"] == ("Succeeded" if outcome == "succeeded" else "Failed")
+    assert kube.created["snapshot"] == [] and kube.created["job"] == []
+
+
+def test_queued_backlog_makes_no_api_calls(kube, adm, monkeypatch):
+    monkeypatch.setattr(cfg, "MAX_CONCURRENT_RUNS", 1)
+    kube.job_result = None
+    active = make_req("active", uid="aaaaaaaa1")
+    run([active], kube, adm, T0, cycles=8)
+    assert active["status"]["phase"] == "Running"
+    backlog = [make_req(f"q{i}", pvc=f"pvc{i}", uid=f"{i:08d}x") for i in range(1000)]
+    for b in backlog:  # first pass writes the Queued status once
+        apply(b, engine.reconcile(b, kube, adm, T0 + timedelta(minutes=5)))
+    calls = kube.calls
+    patches = [engine.reconcile(b, kube, adm, T0 + timedelta(minutes=6)) for b in backlog]
+    assert kube.calls == calls  # a full pass over the backlog: zero API calls
+    assert all(p is None for p in patches)  # and zero status writes
+
+
+def test_rate_limiter_bounds_aggregate_calls():
+    from controller.kube import RateLimiter
+    clock = [0.0]
+    lim = RateLimiter(qps=5, burst=10, clock=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+    for _ in range(110):
+        lim.acquire()
+    assert clock[0] == pytest.approx(20.0, rel=0.01)  # 10 burst + 100 at 5/s

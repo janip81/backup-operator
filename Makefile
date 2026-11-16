@@ -35,7 +35,7 @@ push: guard-tag
 check:
 	docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
 	  -v "$(CURDIR):/src" -w /src $(PY_IMAGE) sh -c \
-	  "pip install -q --user --no-warn-script-location -r requirements-dev.txt && ~/.local/bin/ruff check --no-cache . && python -m pytest -q -p no:cacheprovider"
+	  "pip install -q --user --no-warn-script-location -r requirements-dev.txt && ~/.local/bin/ruff check --no-cache . && python -m pytest -q -p no:cacheprovider -o faulthandler_timeout=60"
 
 lint test: check
 

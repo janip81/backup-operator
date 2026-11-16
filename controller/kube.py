@@ -6,6 +6,8 @@ raise TransientApiError so the reconciler can back off instead of restarting the
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from kubernetes import client, config
@@ -20,6 +22,28 @@ class TransientApiError(Exception):
     """API call failed in a way that may succeed later (timeouts, 5xx, 429, network)."""
 
 
+class RateLimiter:
+    """Process-wide token bucket shared by all reconcile cycles (#8): caps aggregate API load,
+    including the burst when many backoffs expire together after an outage."""
+
+    def __init__(self, qps: float, burst: int, clock=time.monotonic, sleep=time.sleep):
+        self.qps, self.burst, self.clock, self.sleep = qps, burst, clock, sleep
+        self.tokens, self.last = float(burst), clock()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = self.clock()
+                self.tokens = min(self.burst, self.tokens + (now - self.last) * self.qps)
+                self.last = now
+                if self.tokens >= 1 - 1e-9:  # tolerance: float rounding must not stall the loop
+                    self.tokens = max(self.tokens - 1, 0.0)
+                    return
+                wait = max((1 - self.tokens) / self.qps, 0.001)
+            self.sleep(wait)
+
+
 class Kube:
     def __init__(self) -> None:
         try:
@@ -32,9 +56,11 @@ class Kube:
         self.custom = client.CustomObjectsApi(api)
         self.storage = client.StorageV1Api(api)
         self.timeout = (cfg.API_CONNECT_TIMEOUT, cfg.API_READ_TIMEOUT)
+        self.limiter = RateLimiter(cfg.API_QPS, cfg.API_BURST)
 
     # --- error handling ---
     def _call(self, fn, *args, ok_status: tuple[int, ...] = (), **kwargs) -> Any:
+        self.limiter.acquire()
         try:
             return fn(*args, _request_timeout=self.timeout, **kwargs)
         except ApiException as e:
@@ -122,6 +148,10 @@ class Kube:
     def get_cr(self, plural: str, ns: str, name: str) -> dict | None:
         return self._call(self.custom.get_namespaced_custom_object, cfg.GROUP, cfg.VERSION, ns, plural, name,
                           ok_status=(404,))
+
+    def list_crs(self, plural: str) -> list[dict]:
+        res = self._call(self.custom.list_cluster_custom_object, cfg.GROUP, cfg.VERSION, plural)
+        return (res or {}).get("items", [])
 
     def patch_cr_status(self, plural: str, ns: str, name: str, status: dict) -> None:
         self._call(self.custom.patch_namespaced_custom_object_status, cfg.GROUP, cfg.VERSION, ns, plural, name,

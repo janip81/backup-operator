@@ -96,6 +96,14 @@ class Admission:
             self._active[key] = pvc_key
             return True, ""
 
+    def bootstrap(self, requests: list[dict]) -> None:
+        """Register runs that were active before a restart, so limits hold from the first cycle."""
+        for body in requests:
+            phase = (body.get("status") or {}).get("phase")
+            if phase in ACTIVE:
+                req = Req.from_body(body)
+                self.note_active(req.key, req.pvc_key)
+
     def active_count(self) -> int:
         with self._lock:
             return len(self._active)
@@ -163,12 +171,14 @@ def reconcile(body: dict, kube, admission: Admission, now: datetime, rnd=random.
         admission.release(req.key)
         return None
 
+    if phase in ACTIVE:
+        # Before the backoff check: an active run must always count against the limits,
+        # including right after a restart while it is backing off.
+        admission.note_active(req.key, req.pvc_key)
+
     nxt = parse_ts(req.status.get("nextAttemptAt"))
     if nxt and now < nxt:
         return None  # backing off: no API calls at all
-
-    if phase in ACTIVE:
-        admission.note_active(req.key, req.pvc_key)
 
     patch = _step(req, phase, kube, admission, now, rnd)
     if patch and patch.pop("_release", None):
@@ -187,14 +197,19 @@ def _step(req: Req, phase: str, kube, admission: Admission, now: datetime, rnd) 
     except TransientApiError as e:
         errors = int(req.status.get("apiErrors") or 0) + 1
         log.warning("%s: transient API error %d/%d: %s", req.key, errors, cfg.API_ERROR_BUDGET, e)
-        if errors <= cfg.API_ERROR_BUDGET:
+        if phase == "CleaningUp" or errors <= cfg.API_ERROR_BUDGET:
+            # Cleanup never gives up and never changes the attempt's outcome: it backs off (capped) and retries.
             return {"apiErrors": errors, "lastError": str(e)[:500],
                     "nextAttemptAt": ts(now + timedelta(seconds=api_error_delay(errors, rnd)))}
         return _fail_attempt(req, phase, AttemptFailed("ApiErrors", f"Too many consecutive API errors: {e}"), now)
-    except AttemptFailed as e:
+    except (AttemptFailed, ApiException) as e:
+        if isinstance(e, ApiException):  # permanent API rejection (400/403/422): retrying won't help
+            e = AttemptFailed("ApiRejected", f"HTTP {e.status}: {e.reason}", True)
+        if phase == "CleaningUp":
+            errors = int(req.status.get("apiErrors") or 0) + 1
+            return {"reason": "CleanupStuck", "message": f"Cleanup blocked: {e.message}"[:1000], "apiErrors": errors,
+                    "nextAttemptAt": ts(now + timedelta(seconds=api_error_delay(errors, rnd)))}
         return _fail_attempt(req, phase, e, now)
-    except ApiException as e:  # permanent API rejection (400/403/422): retrying the same request won't help
-        return _fail_attempt(req, phase, AttemptFailed("ApiRejected", f"HTTP {e.status}: {e.reason}", True), now)
 
 
 def _fail_attempt(req: Req, phase: str, err: AttemptFailed, now: datetime) -> dict:
@@ -215,15 +230,23 @@ def _phase_timed_out(req: Req, now: datetime, limit: int) -> bool:
 
 # --------------------------------------------------------------------------- steps
 def step_pending(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
+    # Admission first (in memory): queued requests make no API calls at all.
+    ok, why = admission.try_admit(req.key, req.pvc_key, now)
+    if not ok:
+        return _queued(req, "Queued", why)
+    try:
+        return _start_attempt(req, kube, admission, now)
+    except BaseException:
+        admission.release(req.key)
+        raise
+
+
+def _start_attempt(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
     src = kube.get_pvc(req.src_ns, req.src_pvc)
     if not src:
         raise AttemptFailed("SourceNotFound", f"Source PVC {req.pvc_key} not found")
     if (src.get("status") or {}).get("phase") != "Bound":
         raise AttemptFailed("SourceNotBound", f"Source PVC {req.pvc_key} is not Bound")
-
-    ok, why = admission.try_admit(req.key, req.pvc_key, now)
-    if not ok:
-        return _queued(req, "Queued", why)
 
     selector = (f"{MANAGED_BY[0]}={MANAGED_BY[1]},"
                 f"{LABEL_PREFIX}/source-pvc={req.src_pvc[:63]}")
