@@ -1,0 +1,77 @@
+rule_files: [rules.yaml]
+evaluation_interval: 1m
+tests:
+  - name: first failure of a source fires without a baseline
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x60'
+      - series: 'backup_operator_last_failure_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '_x10 600x50'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BackupLatestRunFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BackupLatestRunFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "Latest backup run failed for app/nightly"
+              description: Check the newest Backup record and the BackupRequest status for the reason.
+
+  - name: a later success clears the failure
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x60'
+      - series: 'backup_operator_last_failure_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '600x60'
+      - series: 'backup_operator_last_success_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '0x30 1800x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupLatestRunFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "Latest backup run failed for app/nightly"
+              description: Check the newest Backup record and the BackupRequest status for the reason.
+      - eval_time: 45m
+        alertname: BackupLatestRunFailed
+        exp_alerts: []
+
+  - name: stale backup relative to the schedule interval
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x200'
+      - series: 'backup_operator_last_success_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '0x200'
+      - series: 'backup_operator_schedule_interval_seconds{namespace="app",source="nightly"}'
+        values: '3600x200'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "No successful backup for app/nightly"
+              description: The newest successful backup is older than 1.5x the schedule interval.
+
+  - name: operator down
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x5 _x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BackupOperatorDown
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Backup operator metrics are missing
+              description: The operator isn't running or isn't scraped, so no backups are being taken or tracked.

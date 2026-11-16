@@ -36,12 +36,19 @@ spec:
           annotations:
             summary: "Schedule {{ $labels.namespace }}/{{ $labels.source }} has no successful backup"
 
-        - alert: BackupRunFailed
-          expr: increase(backup_operator_runs_total{result="failed"}[2h]) > 0
+        # Based on durable timestamps rebuilt from Backup records, so the first failure of a source
+        # (and failures from before an operator restart) still fire.
+        - alert: BackupLatestRunFailed
+          expr: |
+            backup_operator_last_failure_timestamp_seconds
+              > on(namespace, source) backup_operator_last_success_timestamp_seconds
+            or
+            backup_operator_last_failure_timestamp_seconds
+              unless on(namespace, source) backup_operator_last_success_timestamp_seconds
           labels: {severity: warning}
           annotations:
-            summary: "Backup run failed for {{ $labels.namespace }}/{{ $labels.source }}"
-            description: Check the Backup record and BackupRequest status for the reason.
+            summary: "Latest backup run failed for {{ $labels.namespace }}/{{ $labels.source }}"
+            description: Check the newest Backup record and the BackupRequest status for the reason.
 
         - alert: BackupSnapshotsAccumulating
           expr: backup_operator_owned_snapshots > 2

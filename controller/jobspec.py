@@ -108,14 +108,14 @@ def worker_job(req, n: dict) -> dict:
     }
 
 
-def backup_record(req) -> dict:
-    """The Backup record (spec only; the result goes into status). Named after the request: idempotent."""
+def backup_record(req, name: str) -> dict:
+    """The Backup record (spec only; the result goes into status)."""
     labels = {k: v for k, v in req.labels().items() if not k.endswith("/attempt")}
     labels["backup.techmonkeys.se/source"] = req.source[:63]
     return {
         "apiVersion": f"{cfg.GROUP}/{cfg.VERSION}",
         "kind": "Backup",
-        "metadata": {"name": req.name, "namespace": req.namespace, "labels": labels},
+        "metadata": {"name": name, "namespace": req.namespace, "labels": labels},
         "spec": {"requestRef": {"name": req.name, "namespace": req.namespace, "uid": req.uid},
                  "source": req.source, "sourceNamespace": req.src_ns, "sourcePVC": req.src_pvc,
                  "method": req.spec.get("transferMethod", "rsync")},

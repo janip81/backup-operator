@@ -18,6 +18,7 @@ class FakeKube:
         self.snapshot_error: str | None = None
         self.job_result = "Complete"  # Complete | Failed | None (keeps running)
         self.wffc = False
+        self.hooks = {}  # method name -> callable(*args) that may raise
         self.termination_message = '{"snapshotId": "abc123", "filesNew": 3}'
         self.cms = {("backup-operator", "rsync-snapshot-default-backup-script"): {"data": {"backup.sh": "echo hi"}}}
         self.secrets = {("backup-operator", "backup-ssh-key"): {"data": {"ssh_key": "a2V5"}}}
@@ -68,8 +69,9 @@ class FakeKube:
             if not self.wffc:
                 o.setdefault("status", {})["phase"] = "Bound"
         for o in self.objs["job"].values():
-            if self.job_result:
-                o["status"] = {"conditions": [{"type": self.job_result, "status": "True", "reason": "x"}]}
+            if self.job_result and not (o.get("status") or {}).get("conditions"):
+                o["status"] = {"conditions": [{"type": self.job_result, "status": "True", "reason": "x"}],
+                               "completionTime": "2026-11-17T03:01:00Z" if self.job_result == "Complete" else None}
 
     def list_job_pods(self, ns, job):
         self._tick()
@@ -153,6 +155,8 @@ class FakeKube:
         self._delete(kind, ns, name, uid)
 
     def create_cr(self, plural, ns, body):
+        if "create_cr" in self.hooks:
+            self.hooks["create_cr"](plural, ns, body)
         self._create(plural, ns, body)
 
     def get_cr(self, plural, ns, name):
@@ -161,5 +165,6 @@ class FakeKube:
     def patch_cr_status(self, plural, ns, name, status):
         self._tick()
         o = self.objs[plural].get((ns, name))
-        if o is not None:
-            o.setdefault("status", {}).update(status)
+        if o is None:
+            raise TransientApiError("HTTP 404 Not Found")
+        o.setdefault("status", {}).update(status)

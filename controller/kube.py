@@ -176,5 +176,6 @@ class Kube:
         return (res or {}).get("items", [])
 
     def patch_cr_status(self, plural: str, ns: str, name: str, status: dict) -> None:
+        # 404 is not success here: a missing record must be retried, never treated as persisted (#11).
         self._call(self.custom.patch_namespaced_custom_object_status, cfg.GROUP, cfg.VERSION, ns, plural, name,
-                   {"status": status}, ok_status=(404,))
+                   {"status": status})

@@ -372,7 +372,9 @@ def _until(body, kube, adm, now, phase, limit=50):
 def test_success_is_recorded_before_any_cleanup(kube, adm):
     body = make_req()
     now = _until(body, kube, adm, T0, "Recording")
-    apply(body, engine.reconcile(body, kube, adm, now))
+    while body["status"]["phase"] == "Recording":  # name, write, read back (no settle: nothing else moves)
+        apply(body, engine.reconcile(body, kube, adm, now))
+        now += timedelta(seconds=10)
     assert body["status"]["phase"] == "CleaningUp"
     rec = kube.objs["backups"][("app", "r1")]
     assert rec["status"]["phase"] == "Succeeded"
@@ -439,3 +441,79 @@ def test_metrics_rebuilt_from_backup_events():
             "status": {"phase": "Succeeded", "completedAt": completed}})
     val = metrics.LAST_SUCCESS.labels(namespace="app", source="nightly")._value.get()
     assert val == datetime(2026, 11, 12, 3, tzinfo=UTC).timestamp()
+
+
+# --- review of #11 (Codex) ---
+
+def test_reused_request_name_gets_its_own_record(kube, adm):
+    kube.objs["backups"][("app", "r1")] = {"metadata": {"name": "r1"},
+                                           "spec": {"requestRef": {"name": "r1", "uid": "old-uid"}},
+                                           "status": {"phase": "Succeeded", "completedAt": "2026-01-01T00:00:00Z"}}
+    body = make_req()
+    run([body], kube, adm, T0)
+    assert body["status"]["phase"] == "Succeeded" and body["status"]["backupRef"] == "r1-01234567"
+    assert kube.objs["backups"][("app", "r1")]["spec"]["requestRef"]["uid"] == "old-uid"  # untouched
+    assert kube.objs["backups"][("app", "r1")]["status"]["completedAt"] == "2026-01-01T00:00:00Z"
+    assert kube.objs["backups"][("app", "r1-01234567")]["status"]["phase"] == "Succeeded"
+
+
+def test_record_deleted_before_status_write_is_retried_not_trusted(kube, adm):
+    body = make_req()
+    now = _until(body, kube, adm, T0, "Recording")
+    apply(body, engine.reconcile(body, kube, adm, now))  # choose record name
+    real_create = kube.create_cr
+
+    def vanish(plural, ns, b):  # the record is created, then disappears before its status is written
+        kube.create_cr = real_create
+        real_create(plural, ns, b)
+        kube.objs[plural].pop((ns, b["metadata"]["name"]))
+
+    kube.create_cr = vanish
+    now += timedelta(minutes=10)
+    apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+    assert body["status"]["phase"] == "Recording" and body["status"]["apiErrors"] == 1  # 404 is not success
+    while body["status"]["phase"] == "Recording":
+        assert ("app", engine.Req.from_body(body).names()["job"]) in kube.objs["job"]  # nothing cleaned up yet
+        now += timedelta(minutes=10)
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+    assert kube.objs["backups"][("app", "r1")]["status"]["phase"] == "Succeeded"  # verified before cleanup
+    run([body], kube, adm, now + timedelta(minutes=10))
+    assert body["status"]["phase"] == "Succeeded"
+    assert kube.objs["backups"][("app", "r1")]["status"]["phase"] == "Succeeded"
+
+
+def test_recording_rejection_keeps_original_failure_reason(kube, adm):
+    from kubernetes.client.exceptions import ApiException
+    kube.job_result = "Failed"
+    body = make_req(maxAttempts=1)
+    now = _until(body, kube, adm, T0, "Recording")
+    def forbid(*_):
+        raise ApiException(status=403, reason="Forbidden")
+    kube.hooks["create_cr"] = forbid
+    for _ in range(4):
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        now += timedelta(minutes=10)
+    assert body["status"]["phase"] == "Recording" and body["status"]["reason"] == "JobFailed"
+    assert "Forbidden" in body["status"]["lastError"]
+    kube.hooks.clear()
+    run([body], kube, adm, now)
+    assert body["status"]["phase"] == "Failed" and body["status"]["reason"] == "JobFailed"
+    assert kube.objs["backups"][("app", "r1")]["status"]["reason"] == "JobFailed"
+
+
+def test_delayed_recording_keeps_transfer_completion_time(kube, adm):
+    from controller import metrics
+    body = make_req(uid="delayed01")
+    now = _until(body, kube, adm, T0, "Recording")
+    transfer_done = engine.parse_ts(body["status"]["completedAt"])
+    kube.fail_next = 1000  # catalog unreachable for hours
+    for _ in range(30):
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        now += timedelta(minutes=10)
+    kube.fail_next = 0
+    run([body], kube, adm, now)
+    rec = kube.objs["backups"][("app", "r1")]["status"]
+    assert engine.parse_ts(rec["completedAt"]) == transfer_done
+    assert engine.parse_ts(rec["recordedAt"]) > transfer_done + timedelta(hours=4)
+    gauge = metrics.LAST_SUCCESS.labels(namespace="app", source="data")._value.get()
+    assert gauge == transfer_done.timestamp()

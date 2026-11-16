@@ -41,6 +41,8 @@ jobs:
         run: ruff check .
       - name: Tests
         run: python -m pytest -q
+      - name: Alert rule tests (promtool)
+        run: ./hack/test-rules.sh
 
   build:
     needs: check

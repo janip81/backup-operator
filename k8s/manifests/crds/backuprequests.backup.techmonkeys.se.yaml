@@ -160,6 +160,10 @@ spec:
                     finishedAt:
                       type: string
                       format: date-time
+              completedAt:
+                type: string
+                format: date-time
+                description: When the transfer finished or the run failed.
         required:
         - spec
     subresources:

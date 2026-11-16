@@ -78,7 +78,7 @@ spec:
               completedAt:
                 type: string
                 format: date-time
-                description: When the result was recorded.
+                description: When the transfer finished (success) or the run failed. Basis for backup age.
               durationSeconds:
                 type: integer
               attempts:
@@ -111,6 +111,10 @@ spec:
               size:
                 type: string
                 description: Deprecated (v0.3 records).
+              recordedAt:
+                type: string
+                format: date-time
+                description: When this record was written.
     subresources:
       status: {}
     additionalPrinterColumns:

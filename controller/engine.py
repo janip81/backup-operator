@@ -236,7 +236,8 @@ def _step(req: Req, phase: str, kube, admission: Admission, now: datetime, rnd) 
             e = AttemptFailed("ApiRejected", f"HTTP {e.status}: {e.reason}", True)
         if phase in NEVER_FAIL:
             errors = int(req.status.get("apiErrors") or 0) + 1
-            return {"reason": f"{phase}Blocked", "message": f"{phase} blocked: {e.message}"[:1000], "apiErrors": errors,
+            # Diagnostics of the run itself (reason/message) are kept; the blocker goes to lastError.
+            return {"lastError": f"{phase} blocked: {e.message}"[:500], "apiErrors": errors,
                     "nextAttemptAt": ts(now + timedelta(seconds=api_error_delay(errors, rnd)))}
         return _fail_attempt(req, phase, e, now)
 
@@ -251,7 +252,7 @@ def _fail_attempt(req: Req, phase: str, err: AttemptFailed, now: datetime) -> di
              "lastError": err.message[:500], "apiErrors": 0, "attempts": history, "attempt": req.attempt}
     if not retry:
         # Final failure: record it durably before anything is cleaned up (#11).
-        return {**patch, "phase": "Recording", "phaseStartedAt": ts(now)}
+        return {**patch, "phase": "Recording", "phaseStartedAt": ts(now), "completedAt": ts(now)}
     if phase == "Pending":
         return {**patch, **_finalize(req, "retry", now)}  # nothing was created for this attempt
     return {**patch, "phase": "CleaningUp", "phaseStartedAt": ts(now)}
@@ -367,7 +368,8 @@ def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | 
         if c.get("status") != "True":
             continue
         if c.get("type") == "Complete":
-            return {"phase": "Recording", "phaseStartedAt": ts(now), "outcome": "succeeded",
+            done = (job.get("status") or {}).get("completionTime") or ts(now)
+            return {"phase": "Recording", "phaseStartedAt": ts(now), "outcome": "succeeded", "completedAt": done,
                     "reason": "Recording", "message": "Worker job completed; recording the result"}
         if c.get("type") == "Failed":
             raise AttemptFailed("JobFailed", f"Worker job failed: {c.get('reason')}: {c.get('message') or ''}")
@@ -376,32 +378,53 @@ def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | 
     return None
 
 
+def record_name(req: Req, existing: dict | None) -> str:
+    """The record is named after the request. If an unrelated record (a deleted request that used the same
+    name) already holds that name, this request's record gets a UID suffix instead of adopting it."""
+    if existing is None or (existing.get("spec") or {}).get("requestRef", {}).get("uid") in (req.uid, None):
+        return req.name
+    return f"{req.name[:54]}-{req.uid[:8]}"
+
+
 def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
-    """Persist the outcome as a Backup record before anything is deleted (#11). Idempotent: the record is
-    named after the request, so repeating this step after an error or restart never duplicates it and
-    never re-runs the transfer."""
+    """Persist the outcome as a Backup record before anything is deleted (#11). Idempotent: repeating
+    this step after an error or restart never duplicates the record and never re-runs the transfer.
+    Cleanup only starts after the stored record has been read back with the expected result."""
     outcome = req.status.get("outcome") or "failed"
     phase = "Succeeded" if outcome == "succeeded" else "Failed"
-    existing = kube.get_cr("backups", req.namespace, req.name)
-    if not ((existing or {}).get("status") or {}).get("phase"):
-        result = _job_result(req, kube)
-        kube.create_cr("backups", req.namespace, jobspec.backup_record(req))
-        started = parse_ts(req.status.get("startedAt"))
-        status = {
-            "phase": phase, "completedAt": ts(now), "startedAt": req.status.get("startedAt"),
-            "durationSeconds": int((now - started).total_seconds()) if started else None,
-            "attempts": req.attempt, "source": req.source,
-            "reason": "Succeeded" if phase == "Succeeded" else req.status.get("reason"),
-            "message": (req.status.get("message") or "")[:1000] if phase == "Failed" else "Backup completed",
-            "result": result.get("result"), "artifact": result.get("artifact"),
-        }
-        kube.patch_cr_status("backups", req.namespace, req.name, {k: v for k, v in status.items() if v is not None})
+    name = req.status.get("backupRef") or record_name(req, kube.get_cr("backups", req.namespace, req.name))
+    if name != req.status.get("backupRef"):
+        return {"backupRef": name}  # persist the chosen name first, then write the record next cycle
+    rec = kube.get_cr("backups", req.namespace, name)
+    if rec is not None and (rec.get("spec") or {}).get("requestRef", {}).get("uid") not in (req.uid, None):
+        raise TransientApiError(f"Backup {name} belongs to another request")  # never adopt or overwrite it
+    stored = (rec or {}).get("status") or {}
+    if stored.get("phase") == phase:  # durable: verified by reading it back
+        completed = parse_ts(stored.get("completedAt")) or now
+        started = parse_ts(stored.get("startedAt"))
         metrics.RUNS.labels(namespace=req.src_ns, source=req.source, result=phase.lower()).inc()
         if started and phase == "Succeeded":
-            metrics.DURATION.labels(namespace=req.src_ns, source=req.source).observe((now - started).total_seconds())
-        metrics.observe_result(req.src_ns, req.source, phase, now.timestamp())
-    return {"phase": "CleaningUp", "phaseStartedAt": ts(now), "backupRef": req.name,
-            "message": f"{phase} recorded as Backup {req.name}; removing temporary resources"}
+            metrics.DURATION.labels(namespace=req.src_ns, source=req.source).observe(
+                (completed - started).total_seconds())
+        metrics.observe_result(req.src_ns, req.source, phase, completed.timestamp())
+        return {"phase": "CleaningUp", "phaseStartedAt": ts(now),
+                "message": f"{phase} recorded as Backup {name}; removing temporary resources"}
+
+    result = _job_result(req, kube)
+    if rec is None:
+        kube.create_cr("backups", req.namespace, jobspec.backup_record(req, name))
+    started = parse_ts(req.status.get("startedAt"))
+    completed = parse_ts(req.status.get("completedAt")) or now
+    status = {
+        "phase": phase, "completedAt": ts(completed), "recordedAt": ts(now), "startedAt": req.status.get("startedAt"),
+        "durationSeconds": int((completed - started).total_seconds()) if started else None,
+        "attempts": req.attempt, "source": req.source,
+        "reason": "Succeeded" if phase == "Succeeded" else req.status.get("reason"),
+        "message": (req.status.get("message") or "")[:1000] if phase == "Failed" else "Backup completed",
+        "result": result.get("result"), "artifact": result.get("artifact"),
+    }
+    kube.patch_cr_status("backups", req.namespace, name, {k: v for k, v in status.items() if v is not None})
+    return None  # next cycle reads the record back before cleanup starts
 
 
 def _job_result(req: Req, kube) -> dict:
@@ -444,9 +467,9 @@ def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict |
     if remaining:
         if _phase_timed_out(req, now, cfg.CLEANUP_TIMEOUT):
             metrics.cleanup_stuck(req.key, True)
-            msg = f"Cleanup still waiting for: {', '.join(remaining)}"
-            if req.status.get("reason") != "CleanupStuck" or req.status.get("message") != msg:
-                return {"reason": "CleanupStuck", "message": msg}
+            msg = f"Cleanup stuck, still waiting for: {', '.join(remaining)}"
+            if req.status.get("lastError") != msg:
+                return {"lastError": msg}
         return None
     metrics.cleanup_stuck(req.key, False)
     return _finalize(req, req.status.get("outcome") or "failed", now)
