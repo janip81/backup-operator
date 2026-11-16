@@ -9,6 +9,7 @@ from prometheus_client import start_http_server
 for module in (
     "controller.handlers.backup_request",
     "controller.handlers.backup_schedule",
+    "controller.handlers.observability",
 ):
     importlib.import_module(module)
 

@@ -15,6 +15,7 @@ Phases:
 """
 from __future__ import annotations
 
+import json
 import logging
 import random
 import threading
@@ -24,14 +25,14 @@ from datetime import UTC, datetime, timedelta
 from kubernetes.client.exceptions import ApiException
 
 from . import config as cfg
-from . import jobspec
+from . import jobspec, metrics
 from .kube import TransientApiError
-from .metrics import backup_duration, backup_failures, backup_total
 
 log = logging.getLogger("backup-operator.engine")
 
 TERMINAL = ("Succeeded", "Failed")
-ACTIVE = ("Snapshotting", "Cloning", "Running", "CleaningUp")
+ACTIVE = ("Snapshotting", "Cloning", "Running", "Recording", "CleaningUp")
+NEVER_FAIL = ("Recording", "CleaningUp")  # after the transfer: errors back off, the outcome never changes
 LABEL_PREFIX = "backup.techmonkeys.se"
 MANAGED_BY = ("app.kubernetes.io/managed-by", "backup-operator")
 
@@ -119,11 +120,13 @@ class Req:
     uid: str
     spec: dict
     status: dict
+    labels_in: dict
 
     @classmethod
     def from_body(cls, body: dict) -> Req:
         md = body["metadata"]
-        return cls(md["name"], md["namespace"], md["uid"], dict(body.get("spec") or {}), dict(body.get("status") or {}))
+        return cls(md["name"], md["namespace"], md["uid"], dict(body.get("spec") or {}), dict(body.get("status") or {}),
+                   dict(md.get("labels") or {}))
 
     @property
     def key(self) -> str:
@@ -137,6 +140,11 @@ class Req:
     @property
     def src_pvc(self) -> str:
         return self.spec["sourcePVC"]
+
+    @property
+    def source(self) -> str:
+        """Stable identity for metrics and records: the schedule name, or the source PVC for ad-hoc runs."""
+        return self.labels_in.get(f"{LABEL_PREFIX}/schedule") or self.src_pvc
 
     @property
     def pvc_key(self) -> str:
@@ -218,7 +226,7 @@ def _step(req: Req, phase: str, kube, admission: Admission, now: datetime, rnd) 
     except TransientApiError as e:
         errors = int(req.status.get("apiErrors") or 0) + 1
         log.warning("%s: transient API error %d/%d: %s", req.key, errors, cfg.API_ERROR_BUDGET, e)
-        if phase == "CleaningUp" or errors <= cfg.API_ERROR_BUDGET:
+        if phase in NEVER_FAIL or errors <= cfg.API_ERROR_BUDGET:
             # Cleanup never gives up and never changes the attempt's outcome: it backs off (capped) and retries.
             return {"apiErrors": errors, "lastError": str(e)[:500],
                     "nextAttemptAt": ts(now + timedelta(seconds=api_error_delay(errors, rnd)))}
@@ -226,21 +234,26 @@ def _step(req: Req, phase: str, kube, admission: Admission, now: datetime, rnd) 
     except (AttemptFailed, ApiException) as e:
         if isinstance(e, ApiException):  # permanent API rejection (400/403/422): retrying won't help
             e = AttemptFailed("ApiRejected", f"HTTP {e.status}: {e.reason}", True)
-        if phase == "CleaningUp":
+        if phase in NEVER_FAIL:
             errors = int(req.status.get("apiErrors") or 0) + 1
-            return {"reason": "CleanupStuck", "message": f"Cleanup blocked: {e.message}"[:1000], "apiErrors": errors,
+            return {"reason": f"{phase}Blocked", "message": f"{phase} blocked: {e.message}"[:1000], "apiErrors": errors,
                     "nextAttemptAt": ts(now + timedelta(seconds=api_error_delay(errors, rnd)))}
         return _fail_attempt(req, phase, e, now)
 
 
 def _fail_attempt(req: Req, phase: str, err: AttemptFailed, now: datetime) -> dict:
     log.warning("%s: attempt %d failed (%s): %s", req.key, req.attempt, err.reason, err.message)
+    metrics.ATTEMPT_FAILURES.labels(namespace=req.src_ns, source=req.source, reason=err.reason).inc()
     retry = not err.terminal and req.attempt < req.max_attempts
+    history = list(req.status.get("attempts") or [])[-9:] + [
+        {"attempt": req.attempt, "reason": err.reason, "message": err.message[:300], "finishedAt": ts(now)}]
     patch = {"outcome": "retry" if retry else "failed", "reason": err.reason, "message": err.message[:1000],
-             "lastError": err.message[:500], "apiErrors": 0}
+             "lastError": err.message[:500], "apiErrors": 0, "attempts": history, "attempt": req.attempt}
+    if not retry:
+        # Final failure: record it durably before anything is cleaned up (#11).
+        return {**patch, "phase": "Recording", "phaseStartedAt": ts(now)}
     if phase == "Pending":
-        # Nothing was created for this attempt, so there's nothing to clean up.
-        return {**patch, **_finalize(req, "retry" if retry else "failed", now)}
+        return {**patch, **_finalize(req, "retry", now)}  # nothing was created for this attempt
     return {**patch, "phase": "CleaningUp", "phaseStartedAt": ts(now)}
 
 
@@ -278,7 +291,6 @@ def _start_attempt(req: Req, kube, admission: Admission, now: datetime) -> dict 
         return _queued(req, "SnapshotCeiling",
                        f"{len(existing)} operator-owned snapshot(s) already exist for {req.pvc_key}: {names}")
 
-    backup_total.labels(namespace=req.src_ns, method=req.spec.get("transferMethod", "rsync")).inc()
     patch = {"phase": "Snapshotting", "phaseStartedAt": ts(now), "attempt": req.attempt,
              "sourceNamespace": req.src_ns,
              "maxAttempts": req.max_attempts, "resources": req.names(), "reason": "Snapshotting",
@@ -355,13 +367,61 @@ def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | 
         if c.get("status") != "True":
             continue
         if c.get("type") == "Complete":
-            return {"phase": "CleaningUp", "phaseStartedAt": ts(now), "outcome": "succeeded",
-                    "reason": "CleaningUp", "message": "Worker job completed; removing temporary resources"}
+            return {"phase": "Recording", "phaseStartedAt": ts(now), "outcome": "succeeded",
+                    "reason": "Recording", "message": "Worker job completed; recording the result"}
         if c.get("type") == "Failed":
             raise AttemptFailed("JobFailed", f"Worker job failed: {c.get('reason')}: {c.get('message') or ''}")
     if _phase_timed_out(req, now, cfg.JOB_TIMEOUT + 300):
         raise AttemptFailed("JobTimeout", f"Worker job did not finish within {cfg.JOB_TIMEOUT}s")
     return None
+
+
+def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
+    """Persist the outcome as a Backup record before anything is deleted (#11). Idempotent: the record is
+    named after the request, so repeating this step after an error or restart never duplicates it and
+    never re-runs the transfer."""
+    outcome = req.status.get("outcome") or "failed"
+    phase = "Succeeded" if outcome == "succeeded" else "Failed"
+    existing = kube.get_cr("backups", req.namespace, req.name)
+    if not ((existing or {}).get("status") or {}).get("phase"):
+        result = _job_result(req, kube)
+        kube.create_cr("backups", req.namespace, jobspec.backup_record(req))
+        started = parse_ts(req.status.get("startedAt"))
+        status = {
+            "phase": phase, "completedAt": ts(now), "startedAt": req.status.get("startedAt"),
+            "durationSeconds": int((now - started).total_seconds()) if started else None,
+            "attempts": req.attempt, "source": req.source,
+            "reason": "Succeeded" if phase == "Succeeded" else req.status.get("reason"),
+            "message": (req.status.get("message") or "")[:1000] if phase == "Failed" else "Backup completed",
+            "result": result.get("result"), "artifact": result.get("artifact"),
+        }
+        kube.patch_cr_status("backups", req.namespace, req.name, {k: v for k, v in status.items() if v is not None})
+        metrics.RUNS.labels(namespace=req.src_ns, source=req.source, result=phase.lower()).inc()
+        if started and phase == "Succeeded":
+            metrics.DURATION.labels(namespace=req.src_ns, source=req.source).observe((now - started).total_seconds())
+        metrics.observe_result(req.src_ns, req.source, phase, now.timestamp())
+    return {"phase": "CleaningUp", "phaseStartedAt": ts(now), "backupRef": req.name,
+            "message": f"{phase} recorded as Backup {req.name}; removing temporary resources"}
+
+
+def _job_result(req: Req, kube) -> dict:
+    """Exit details and the worker's JSON summary (termination message, never logs) from the job pod."""
+    pods = kube.list_job_pods(req.src_ns, req.names()["job"]) if req.status.get("resources") else []
+    for pod in pods:
+        for cs in ((pod.get("status") or {}).get("containerStatuses") or []):
+            term = ((cs.get("state") or {}).get("terminated")) or {}
+            if not term:
+                continue
+            out = {"result": {"exitCode": term.get("exitCode"), "reason": term.get("reason")}}
+            msg = term.get("message") or ""
+            try:
+                parsed = json.loads(msg) if msg.strip().startswith("{") else None
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                out["artifact"] = parsed
+            return out
+    return {}
 
 
 def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict | None:
@@ -383,11 +443,13 @@ def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict |
             deleter(ns, n[kind], obj["metadata"].get("uid"))
     if remaining:
         if _phase_timed_out(req, now, cfg.CLEANUP_TIMEOUT):
+            metrics.cleanup_stuck(req.key, True)
             msg = f"Cleanup still waiting for: {', '.join(remaining)}"
             if req.status.get("reason") != "CleanupStuck" or req.status.get("message") != msg:
                 return {"reason": "CleanupStuck", "message": msg}
         return None
-    return _finalize(req, req.status.get("outcome") or "failed", now, kube)
+    metrics.cleanup_stuck(req.key, False)
+    return _finalize(req, req.status.get("outcome") or "failed", now)
 
 
 def cleanup_all(req: Req, kube) -> list[str]:
@@ -405,25 +467,17 @@ def cleanup_all(req: Req, kube) -> list[str]:
     return remaining
 
 
-def _finalize(req: Req, outcome: str, now: datetime, kube=None) -> dict:
-    admission_key = req.key
+def _finalize(req: Req, outcome: str, now: datetime) -> dict:
+    """End of an attempt, after cleanup. The result was already recorded in Recording."""
     if outcome == "retry":
         delay = retry_delay(req.attempt)
         return {"phase": "Pending", "attempt": req.attempt + 1, "outcome": None, "resources": None,
                 "nextAttemptAt": ts(now + timedelta(seconds=delay)), "phaseStartedAt": None,
-                "message": f"Attempt {req.attempt} failed; retrying in {int(delay)}s", "_release": admission_key}
-    started = parse_ts(req.status.get("startedAt"))
-    duration = (now - started).total_seconds() if started else None
-    method = req.spec.get("transferMethod", "rsync")
+                "message": f"Attempt {req.attempt} failed; retrying in {int(delay)}s", "_release": True}
     if outcome == "succeeded":
-        if kube is not None:
-            jobspec.record_backup(req, kube, now, duration)
-        if duration is not None:
-            backup_duration.labels(namespace=req.src_ns, method=method).observe(duration)
         return {"phase": "Succeeded", "finishedAt": ts(now), "reason": "Succeeded", "nextAttemptAt": None,
-                "message": f"Backup completed (attempt {req.attempt})", "_release": admission_key}
-    backup_failures.labels(namespace=req.src_ns, method=method, reason=req.status.get("reason") or "Failed").inc()
-    return {"phase": "Failed", "finishedAt": ts(now), "nextAttemptAt": None, "_release": admission_key}
+                "message": f"Backup completed (attempt {req.attempt})", "_release": True}
+    return {"phase": "Failed", "finishedAt": ts(now), "nextAttemptAt": None, "_release": True}
 
 
 STEPS = {
@@ -431,5 +485,6 @@ STEPS = {
     "Snapshotting": step_snapshotting,
     "Cloning": step_cloning,
     "Running": step_running,
+    "Recording": step_recording,
     "CleaningUp": step_cleaning,
 }

@@ -77,6 +77,9 @@ def worker_job(req, n: dict) -> dict:
         "containers": [{
             "name": "worker",
             "image": cfg.WORKER_IMAGE,
+            # The worker reports its JSON summary here; logs are never copied into records (#11, #13).
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
             "command": ["/bin/bash", f"/opt/custom/{key}"],
             "env": [{"name": k, "value": v} for k, v in env.items()],
             "volumeMounts": [
@@ -105,18 +108,15 @@ def worker_job(req, n: dict) -> dict:
     }
 
 
-def record_backup(req, kube, now, duration) -> None:
-    """Create the Backup record for a successful run (idempotent: name = request name)."""
-    from .engine import ts
-    body = {
+def backup_record(req) -> dict:
+    """The Backup record (spec only; the result goes into status). Named after the request: idempotent."""
+    labels = {k: v for k, v in req.labels().items() if not k.endswith("/attempt")}
+    labels["backup.techmonkeys.se/source"] = req.source[:63]
+    return {
         "apiVersion": f"{cfg.GROUP}/{cfg.VERSION}",
         "kind": "Backup",
-        "metadata": {"name": req.name, "namespace": req.namespace, "labels": req.labels()},
-        "spec": {"requestRef": {"name": req.name, "namespace": req.namespace}, "targetNamespace": req.src_ns,
+        "metadata": {"name": req.name, "namespace": req.namespace, "labels": labels},
+        "spec": {"requestRef": {"name": req.name, "namespace": req.namespace, "uid": req.uid},
+                 "source": req.source, "sourceNamespace": req.src_ns, "sourcePVC": req.src_pvc,
                  "method": req.spec.get("transferMethod", "rsync")},
     }
-    kube.create_cr("backups", req.namespace, body)
-    kube.patch_cr_status("backups", req.namespace, req.name, {
-        "phase": "Succeeded", "completedAt": ts(now), "attempt": req.attempt,
-        "duration": f"{int(duration)}s" if duration is not None else None,
-    })

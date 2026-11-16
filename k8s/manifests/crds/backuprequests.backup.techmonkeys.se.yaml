@@ -75,12 +75,13 @@ spec:
             properties:
               phase:
                 type: string
-                description: Pending, Snapshotting, Cloning, Running, CleaningUp, Succeeded or Failed.
+                description: Pending, Snapshotting, Cloning, Running, Recording, CleaningUp, Succeeded or Failed.
                 enum:
                 - Pending
                 - Snapshotting
                 - Cloning
                 - Running
+                - Recording
                 - CleaningUp
                 - Succeeded
                 - Failed
@@ -141,6 +142,24 @@ spec:
               sourceNamespace:
                 type: string
                 description: Source namespace recorded at first admission; used for all cleanup.
+              backupRef:
+                type: string
+                description: Name of the Backup record (same namespace) holding the final result.
+              attempts:
+                type: array
+                description: Failed attempts (most recent 10).
+                items:
+                  type: object
+                  properties:
+                    attempt:
+                      type: integer
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    finishedAt:
+                      type: string
+                      format: date-time
         required:
         - spec
     subresources:

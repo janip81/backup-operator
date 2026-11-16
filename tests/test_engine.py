@@ -59,7 +59,7 @@ def test_happy_path_uses_deterministic_names_and_cleans_up(kube, adm):
     assert not kube.objs["snapshot"] and not kube.objs["job"] and not kube.objs["secret"] and not kube.objs["configMap"]
     # only the source PVCs are left
     assert set(kube.objs["pvc"]) == {("app", "data"), ("app", "other")}
-    assert ("app", "r1") in kube.objs["backups"]
+    assert kube.objs["backups"][("app", "r1")]["status"]["phase"] == "Succeeded"
     assert adm.active_count() == 0
 
 
@@ -117,7 +117,12 @@ def test_api_error_budget_fails_the_attempt(kube, adm, monkeypatch):
     for _ in range(5):
         apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
         now += timedelta(hours=1)
+    # the attempt has failed; the result waits for the API to come back so it can be recorded
+    assert body["status"]["phase"] == "Recording" and body["status"]["outcome"] == "failed"
+    kube.fail_next = 0
+    run([body], kube, adm, now)
     assert body["status"]["phase"] == "Failed" and body["status"]["reason"] == "ApiErrors"
+    assert kube.objs["backups"][("app", "r1")]["status"]["reason"] == "ApiErrors"
 
 
 def test_snapshot_limit_is_terminal_not_retried(kube, adm):
@@ -350,3 +355,87 @@ def test_cleanup_uses_recorded_source_namespace(kube):
     body["spec"]["sourceNamespace"] = "b-ns"  # (rejected by the CRD; cleanup must not follow it anyway)
     assert engine.cleanup_all(engine.Req.from_body(body), kube) == [name]
     assert ("a-ns", name) not in kube.objs["job"]
+
+
+# --- #11: outcomes recorded before cleanup ---
+
+def _until(body, kube, adm, now, phase, limit=50):
+    for _ in range(limit):
+        if body["status"].get("phase") == phase:
+            return now
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        kube.settle()
+        now += timedelta(seconds=10)
+    raise AssertionError(f"never reached {phase}: {body['status']}")
+
+
+def test_success_is_recorded_before_any_cleanup(kube, adm):
+    body = make_req()
+    now = _until(body, kube, adm, T0, "Recording")
+    apply(body, engine.reconcile(body, kube, adm, now))
+    assert body["status"]["phase"] == "CleaningUp"
+    rec = kube.objs["backups"][("app", "r1")]
+    assert rec["status"]["phase"] == "Succeeded"
+    assert rec["status"]["artifact"] == {"snapshotId": "abc123", "filesNew": 3}
+    assert rec["status"]["result"]["exitCode"] == 0
+    names = engine.Req.from_body(body).names()
+    assert ("app", names["job"]) in kube.objs["job"]  # temporary objects still present when recorded
+    run([body], kube, adm, now)
+    assert body["status"]["phase"] == "Succeeded" and body["status"]["backupRef"] == "r1"
+
+
+def test_record_failure_never_reruns_the_transfer(kube, adm, monkeypatch):
+    monkeypatch.setattr(cfg, "API_ERROR_BUDGET", 1)
+    body = make_req()
+    now = _until(body, kube, adm, T0, "Recording")
+    kube.fail_next = 40
+    for _ in range(40):
+        apply(body, engine.reconcile(body, kube, adm, now, rnd=lambda: 0.5))
+        assert body["status"]["phase"] == "Recording" and body["status"]["outcome"] == "succeeded"
+        now += timedelta(minutes=10)
+        if not kube.fail_next:
+            break
+    run([body], kube, adm, now)
+    assert body["status"]["phase"] == "Succeeded"
+    assert kube.created["job"] == ["bo-01234567-a1-job"]
+    assert kube.objs["backups"][("app", "r1")]["status"]["phase"] == "Succeeded"
+
+
+def test_final_job_failure_is_recorded_with_history(kube, adm):
+    kube.job_result = "Failed"
+    body = make_req(maxAttempts=2)
+    run([body], kube, adm, T0, cycles=2000)
+    assert body["status"]["phase"] == "Failed"
+    assert [a["attempt"] for a in body["status"]["attempts"]] == [1, 2]
+    rec = kube.objs["backups"][("app", "r1")]["status"]
+    assert rec["phase"] == "Failed" and rec["reason"] == "JobFailed" and rec["result"]["exitCode"] == 1
+    assert rec["attempts"] == 2
+
+
+def test_missing_source_is_recorded_as_failed(kube, adm):
+    body = make_req(pvc="nope", maxAttempts=1)
+    run([body], kube, adm, T0)
+    assert kube.objs["backups"][("app", "r1")]["status"]["reason"] == "SourceNotFound"
+
+
+@pytest.mark.parametrize("phase", ["Snapshotting", "Cloning", "Running", "Recording", "CleaningUp"])
+def test_restart_in_any_phase_resumes_without_duplicates(kube, phase):
+    adm = engine.Admission(ready=True)
+    body = make_req()
+    now = _until(body, kube, adm, T0, phase)
+    fresh = engine.Admission()  # operator restart
+    fresh.bootstrap([body])
+    run([body], kube, fresh, now)
+    assert body["status"]["phase"] == "Succeeded"
+    assert len(kube.created["snapshot"]) == len(kube.created["job"]) == len(kube.created["backups"]) == 1
+
+
+def test_metrics_rebuilt_from_backup_events():
+    from controller import metrics
+    from controller.handlers import observability
+    for completed in ("2026-11-10T03:00:00Z", "2026-11-12T03:00:00Z", "2026-11-11T03:00:00Z"):
+        observability.backup_event(event={"type": "ADDED"}, body={
+            "metadata": {"name": "x", "namespace": "app"}, "spec": {"source": "nightly", "sourceNamespace": "app"},
+            "status": {"phase": "Succeeded", "completedAt": completed}})
+    val = metrics.LAST_SUCCESS.labels(namespace="app", source="nightly")._value.get()
+    assert val == datetime(2026, 11, 12, 3, tzinfo=UTC).timestamp()

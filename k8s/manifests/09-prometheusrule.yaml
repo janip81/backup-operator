@@ -1,0 +1,60 @@
+# Alert rules for the backup operator (#11). Requires the Prometheus Operator; label the rule so your
+# Prometheus selects it (ruleSelector).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: backup-operator
+  namespace: backup-operator
+spec:
+  groups:
+    - name: backup-operator
+      rules:
+        - alert: BackupOperatorDown
+          expr: absent(backup_operator_active_runs)
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: Backup operator metrics are missing
+            description: The operator isn't running or isn't scraped, so no backups are being taken or tracked.
+
+        - alert: BackupStale
+          expr: |
+            (time() - backup_operator_last_success_timestamp_seconds)
+              > on(namespace, source) group_left() (1.5 * backup_operator_schedule_interval_seconds)
+          for: 30m
+          labels: {severity: warning}
+          annotations:
+            summary: "No successful backup for {{ $labels.namespace }}/{{ $labels.source }}"
+            description: The newest successful backup is older than 1.5x the schedule interval.
+
+        - alert: BackupNeverSucceeded
+          expr: |
+            backup_operator_schedule_interval_seconds
+              unless on(namespace, source) backup_operator_last_success_timestamp_seconds
+          for: 48h
+          labels: {severity: warning}
+          annotations:
+            summary: "Schedule {{ $labels.namespace }}/{{ $labels.source }} has no successful backup"
+
+        - alert: BackupRunFailed
+          expr: increase(backup_operator_runs_total{result="failed"}[2h]) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Backup run failed for {{ $labels.namespace }}/{{ $labels.source }}"
+            description: Check the Backup record and BackupRequest status for the reason.
+
+        - alert: BackupSnapshotsAccumulating
+          expr: backup_operator_owned_snapshots > 2
+          for: 30m
+          labels: {severity: critical}
+          annotations:
+            summary: "{{ $value }} operator-owned VolumeSnapshots in {{ $labels.namespace }}"
+            description: Snapshots should exist only while a run is active. Check for stuck cleanup before storage or etcd suffer.
+
+        - alert: BackupCleanupStuck
+          expr: backup_operator_cleanup_stuck_requests > 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: Backup cleanup is stuck
+            description: A run can't remove its temporary objects. New runs for that source stay blocked.

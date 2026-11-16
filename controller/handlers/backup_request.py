@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import kopf
 
 from .. import config as cfg
-from .. import engine
+from .. import engine, metrics
 from ..runtime import ADMISSION, ensure_bootstrapped, kube
 
 
@@ -17,6 +17,7 @@ def bootstrap_admission(**_):
 def reconcile_request(body, patch, logger, **_):
     ensure_bootstrapped()
     status_patch = engine.reconcile(dict(body), kube(), ADMISSION, datetime.now(UTC))
+    metrics.ACTIVE_RUNS.set(ADMISSION.active_count())
     if status_patch:
         for k, v in status_patch.items():
             patch.status[k] = v

@@ -18,6 +18,7 @@ class FakeKube:
         self.snapshot_error: str | None = None
         self.job_result = "Complete"  # Complete | Failed | None (keeps running)
         self.wffc = False
+        self.termination_message = '{"snapshotId": "abc123", "filesNew": 3}'
         self.cms = {("backup-operator", "rsync-snapshot-default-backup-script"): {"data": {"backup.sh": "echo hi"}}}
         self.secrets = {("backup-operator", "backup-ssh-key"): {"data": {"ssh_key": "a2V5"}}}
 
@@ -69,6 +70,15 @@ class FakeKube:
         for o in self.objs["job"].values():
             if self.job_result:
                 o["status"] = {"conditions": [{"type": self.job_result, "status": "True", "reason": "x"}]}
+
+    def list_job_pods(self, ns, job):
+        self._tick()
+        j = self.objs["job"].get((ns, job))
+        if not j or not (j.get("status") or {}).get("conditions"):
+            return []
+        code = 0 if j["status"]["conditions"][0]["type"] == "Complete" else 1
+        return [{"status": {"containerStatuses": [{"state": {"terminated": {
+            "exitCode": code, "reason": "Completed" if code == 0 else "Error", "message": self.termination_message}}}]}}]
 
     # --- Kube API surface ---
     def get_pvc(self, ns, name):
