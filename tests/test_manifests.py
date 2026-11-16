@@ -7,7 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _docs():
-    for path in sorted((ROOT / "k8s").rglob("*.yaml")):
+    for path in sorted([*(ROOT / "k8s").rglob("*.yaml"), *(ROOT / "examples").rglob("*.yaml")]):
         for doc in yaml.safe_load_all(path.read_text()):
             if doc:
                 yield path, doc

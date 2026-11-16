@@ -14,7 +14,9 @@ CREATED = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
 def schedule(cron="0 3 * * *", **spec):
     return {"metadata": {"name": "nightly", "namespace": "app", "uid": "sched-uid-1",
                          "creationTimestamp": ts(CREATED)},
-            "spec": {"schedule": cron, "template": {"sourcePVC": "data", "snapshotClass": "snap", "remotePath": "x"},
+            "spec": {"schedule": cron, "template": {"sourcePVC": "data", "snapshotClass": "snap",
+                                                       "repository": {"url": "s3:https://s3.example/b",
+                                                                      "credentialsSecret": "creds"}},
                      **spec},
             "status": {}}
 

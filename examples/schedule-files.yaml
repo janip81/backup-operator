@@ -1,0 +1,20 @@
+# Nightly backup of a whole volume that has no application-level backup.
+apiVersion: backup.techmonkeys.se/v1
+kind: BackupSchedule
+metadata:
+  name: my-app-data
+  namespace: my-app
+spec:
+  schedule: "15 2 * * *"
+  timeZone: Europe/Stockholm
+  template:
+    sourcePVC: my-app-data
+    snapshotClass: csi-snapclass
+    plugin:
+      name: files
+      config:
+        exclude: "/cache, *.tmp"
+    repository:
+      url: s3:https://s3.example.com/backups/my-app
+      credentialsSecret: backup-repository
+    retention: {keepDaily: 7, keepWeekly: 4, keepMonthly: 6}

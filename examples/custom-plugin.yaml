@@ -1,0 +1,33 @@
+# Custom plugin: a script in your namespace decides what to back up. Contract:
+#   read the volume under $SOURCE_DIR (read-only), then either write files into $OUTPUT_DIR or
+#   list absolute paths (one per line) in $OUTPUT_DIR/.backup-paths; optional restic exclude patterns
+#   in $OUTPUT_DIR/.backup-excludes. Files under $OUTPUT_DIR/volume/<path> are restored over the
+#   volume at <path>. Exit non-zero to fail the run. The script has no Kubernetes API access.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-plugin
+  namespace: my-app
+data:
+  plugin.sh: |
+    set -euo pipefail
+    # example: the newest export plus the config directory
+    newest=$(ls -t "$SOURCE_DIR"/exports/*.json | head -n1)
+    printf '%s\n' "$newest" "$SOURCE_DIR/config" > "$OUTPUT_DIR/.backup-paths"
+---
+apiVersion: backup.techmonkeys.se/v1
+kind: BackupSchedule
+metadata:
+  name: my-app-exports
+  namespace: my-app
+spec:
+  schedule: "0 4 * * *"
+  template:
+    sourcePVC: my-app-data
+    snapshotClass: csi-snapclass
+    plugin:
+      name: custom
+      configMapRef: {name: my-plugin}
+    repository:
+      url: s3:https://s3.example.com/backups/my-app
+      credentialsSecret: backup-repository

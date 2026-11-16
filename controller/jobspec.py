@@ -5,6 +5,8 @@ cleanup can find them without guessing (#8, #10).
 """
 from __future__ import annotations
 
+import re
+
 from . import config as cfg
 
 SNAP_API = "snapshot.storage.k8s.io/v1"
@@ -36,63 +38,114 @@ def clone_pvc(req, n: dict, size: str) -> dict:
     return {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": _meta(req, n["pvc"]), "spec": spec}
 
 
-def _preset(req) -> tuple[str, str]:
-    script = req.spec.get("customScript") or {}
-    return script.get("preset") or "rsync-snapshot-default-backup-script", script.get("key") or "backup.sh"
+PLUGIN_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
+CREDS_DIR = "/etc/backup/creds"
+
+
+def _plugin(req) -> dict:
+    return req.spec.get("plugin") or {"name": "files"}
+
+
+def plugin_env(req) -> dict:
+    """plugin.config {pathsToKeep: [a, b]} -> PLUGIN_PATHS_TO_KEEP=a,b (values are data, never shell)."""
+    env = {}
+    for key, value in (_plugin(req).get("config") or {}).items():
+        if not PLUGIN_KEY.match(key):
+            from .engine import AttemptFailed
+            raise AttemptFailed("InvalidPluginConfig", f"invalid plugin config key: {key!r}", terminal=True)
+        name = "PLUGIN_" + re.sub(r"(?<!^)(?=[A-Z])", "_", key).upper()
+        if isinstance(value, list):
+            value = ",".join(str(v) for v in value)
+        elif isinstance(value, bool):
+            value = "true" if value else "false"
+        env[name] = str(value)
+    return env
 
 
 def ensure_dependencies(req, n: dict, kube) -> None:
-    """Copy the transfer script and SSH key into the source namespace under this attempt's own names.
-
-    Copies are never shared between runs, so cleaning one run up can't break another (#10)."""
-    preset, key = _preset(req)
-    src_cm = kube.get_configmap(cfg.OPERATOR_NAMESPACE, preset)
-    if not src_cm or key not in (src_cm.get("data") or {}):
-        from .engine import AttemptFailed
-        raise AttemptFailed("ScriptNotFound", f"Script preset {preset}:{key} not found", terminal=True)
-    kube.create_configmap(req.src_ns, {"metadata": _meta(req, n["configMap"]),
-                                       "data": {key: src_cm["data"][key]}})
-    src_secret = kube.get_secret(cfg.OPERATOR_NAMESPACE, "backup-ssh-key")
-    if not src_secret or "ssh_key" not in (src_secret.get("data") or {}):
-        from .engine import AttemptFailed
-        raise AttemptFailed("CredentialsNotFound", "Destination credentials not found", terminal=True)
-    kube.create_secret(req.src_ns, {"metadata": _meta(req, n["secret"]), "type": "Opaque",
-                                    "data": {"ssh_key": src_secret["data"]["ssh_key"]}})
+    """Validate what the worker will mount from the source namespace. Nothing is copied (#10, #13):
+    the credentials Secret and a custom plugin's ConfigMap are owned by the application namespace."""
+    from .engine import AttemptFailed
+    repo = req.spec.get("repository") or {}
+    secret = kube.get_secret(req.src_ns, repo.get("credentialsSecret", ""))
+    if not secret or "RESTIC_PASSWORD" not in (secret.get("data") or {}):
+        raise AttemptFailed("CredentialsNotFound",
+                            f"Secret {req.src_ns}/{repo.get('credentialsSecret')} with key RESTIC_PASSWORD not found",
+                            terminal=True)
+    plugin = _plugin(req)
+    if plugin.get("name") == "custom":
+        ref = plugin.get("configMapRef") or {}
+        cm = kube.get_configmap(req.src_ns, ref.get("name", ""))
+        if not cm or ref.get("key", "plugin.sh") not in (cm.get("data") or {}):
+            raise AttemptFailed("PluginNotFound", f"ConfigMap {req.src_ns}/{ref.get('name')} with the plugin script "
+                                f"key {ref.get('key', 'plugin.sh')!r} not found", terminal=True)
+    plugin_env(req)  # validates config keys
 
 
 def worker_job(req, n: dict) -> dict:
-    _, key = _preset(req)
     labels = req.labels()
+    plugin = _plugin(req)
+    repo = req.spec.get("repository") or {}
+    retention = req.spec.get("retention") or {}
     env = {
-        "NAMESPACE": req.src_ns,
-        "PVC_NAME": req.src_pvc,
-        "REMOTE_PATH": req.spec.get("remotePath", ""),
-        "SOURCE_PATH": req.spec.get("sourcePath", ""),
-        "MOUNT_PATH": cfg.MOUNT_PATH,
-        "SSH_KEY_PATH": "/etc/backup/ssh/ssh_key",
+        "RESTIC_REPOSITORY": repo["url"],
+        "INIT_REPOSITORY": "true" if repo.get("initialize", True) else "false",
+        "ALLOW_INSECURE": "true" if repo.get("allowInsecure") else "false",
+        "BACKUP_SOURCE": req.source,
+        "BACKUP_HOST": req.src_ns,
+        "BACKUP_REQUEST": req.name,
+        "PLUGIN": plugin.get("name", "files"),
+        "VERIFY": "true" if req.spec.get("verify") else "false",
+        "SOURCE_DIR": "/source",
+        "OUTPUT_DIR": "/output",
+        "CREDS_DIR": CREDS_DIR,
+        **{k: str(retention[f]) for f, k in (("keepLast", "KEEP_LAST"), ("keepDaily", "KEEP_DAILY"),
+                                             ("keepWeekly", "KEEP_WEEKLY"), ("keepMonthly", "KEEP_MONTHLY"))
+           if retention.get(f) is not None},
+        **plugin_env(req),
     }
+    mounts = [
+        {"name": "source", "mountPath": "/source", "readOnly": True},
+        {"name": "output", "mountPath": "/output"},
+        {"name": "tmp", "mountPath": "/tmp"},
+        {"name": "creds", "mountPath": CREDS_DIR, "readOnly": True},
+    ]
+    volumes = [
+        {"name": "source", "persistentVolumeClaim": {"claimName": n["pvc"], "readOnly": True}},
+        {"name": "output", "emptyDir": {"sizeLimit": cfg.WORKER_OUTPUT_LIMIT}},
+        {"name": "tmp", "emptyDir": {"sizeLimit": cfg.WORKER_TMP_LIMIT}},
+        {"name": "creds", "secret": {"secretName": repo["credentialsSecret"], "defaultMode": 0o400}},
+    ]
+    if plugin.get("name") == "custom":
+        ref = plugin.get("configMapRef") or {}
+        mounts.append({"name": "plugin", "mountPath": "/plugin-custom", "readOnly": True})
+        volumes.append({"name": "plugin", "configMap": {"name": ref["name"], "defaultMode": 0o444,
+                                                        "items": [{"key": ref.get("key", "plugin.sh"),
+                                                                   "path": "plugin.sh"}]}})
     pod_spec = {
         "restartPolicy": "Never",
         "automountServiceAccountToken": False,  # workers never talk to the Kubernetes API
+        "enableServiceLinks": False,
+        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
         "containers": [{
             "name": "worker",
             "image": cfg.WORKER_IMAGE,
+            "args": ["backup"],
             # The worker reports its JSON summary here; logs are never copied into records (#11, #13).
             "terminationMessagePath": "/dev/termination-log",
             "terminationMessagePolicy": "File",
-            "command": ["/bin/bash", f"/opt/custom/{key}"],
             "env": [{"name": k, "value": v} for k, v in env.items()],
-            "volumeMounts": [
-                {"name": "src", "mountPath": cfg.MOUNT_PATH, "readOnly": True},
-                {"name": "custom", "mountPath": "/opt/custom", "readOnly": True},
-                {"name": "ssh", "mountPath": "/etc/backup/ssh", "readOnly": True},
-            ],
+            "volumeMounts": mounts,
+            "resources": cfg.WORKER_RESOURCES,
+            # Root is needed to read every file on the snapshot clone; all capabilities are dropped except
+            # DAC_READ_SEARCH (read any file), and the root filesystem is read-only.
+            "securityContext": {
+                "runAsUser": 0, "runAsGroup": 0, "runAsNonRoot": False,
+                "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "privileged": False,
+                "capabilities": {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]},
+            },
         }],
-        "volumes": [
-            {"name": "src", "persistentVolumeClaim": {"claimName": n["pvc"], "readOnly": True}},
-            {"name": "custom", "configMap": {"name": n["configMap"]}},
-            {"name": "ssh", "secret": {"secretName": n["secret"], "defaultMode": 0o400}},
-        ],
+        "volumes": volumes,
     }
     if cfg.IMAGE_PULL_SECRET:
         pod_spec["imagePullSecrets"] = [{"name": cfg.IMAGE_PULL_SECRET}]
@@ -118,5 +171,6 @@ def backup_record(req, name: str) -> dict:
         "metadata": {"name": name, "namespace": req.namespace, "labels": labels},
         "spec": {"requestRef": {"name": req.name, "namespace": req.namespace, "uid": req.uid},
                  "source": req.source, "sourceNamespace": req.src_ns, "sourcePVC": req.src_pvc,
-                 "method": req.spec.get("transferMethod", "rsync")},
+                 "plugin": _plugin(req).get("name", "files"),
+                 "repository": (req.spec.get("repository") or {}).get("url")},
     }

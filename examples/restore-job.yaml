@@ -1,0 +1,46 @@
+# Restore a snapshot into a NEW, empty PVC, check it, then point the app at it (or copy back).
+# Find snapshot IDs in the Backup records: kubectl get backups -n my-app -o wide
+#   (.status.artifact.shortId) or use "latest" for the newest snapshot of the source.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-app-data-restored
+  namespace: my-app
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: restore-my-app
+  namespace: my-app
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: restore
+          image: ghcr.io/janip81/backup-operator-worker:0.4.0
+          args: [restore]
+          env:
+            - {name: RESTIC_REPOSITORY, value: "s3:https://s3.example.com/backups/my-app"}
+            - {name: BACKUP_SOURCE, value: my-app-data}      # schedule name (or PVC name for ad-hoc runs)
+            - {name: RESTORE_SNAPSHOT, value: latest}        # or a snapshot ID
+            - {name: RESTORE_TARGET, value: /restore}
+          # Restoring writes files and restores their original owners, so it needs more than a backup.
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
+          volumeMounts:
+            - {name: target, mountPath: /restore}
+            - {name: creds, mountPath: /etc/backup/creds, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: target, persistentVolumeClaim: {claimName: my-app-data-restored}}
+        - {name: creds, secret: {secretName: backup-repository, defaultMode: 0400}}
+        - {name: tmp, emptyDir: {}}

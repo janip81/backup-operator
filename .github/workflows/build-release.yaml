@@ -104,6 +104,20 @@ jobs:
             fi
           done <<< "$TAGS"
 
+      # Test the exact image before anything is pushed.
+      - name: Build for tests
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./${{ matrix.component }}/Dockerfile
+          load: true
+          tags: local/${{ matrix.component }}:test
+          cache-from: type=gha,scope=${{ matrix.component }}
+
+      - name: Worker integration tests
+        if: matrix.component == 'worker'
+        run: WORKER_IMAGE=local/worker:test ./tests/worker/test_worker.sh
+
       - name: Build (and push outside PRs)
         uses: docker/build-push-action@v6
         with:

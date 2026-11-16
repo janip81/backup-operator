@@ -160,8 +160,7 @@ class Req:
 
     def names(self, attempt: int | None = None) -> dict:
         base = f"bo-{self.uid[:8]}-a{attempt or self.attempt}"
-        return {"snapshot": f"{base}-snap", "pvc": f"{base}-pvc", "job": f"{base}-job",
-                "secret": f"{base}-ssh", "configMap": f"{base}-script"}
+        return {"snapshot": f"{base}-snap", "pvc": f"{base}-pvc", "job": f"{base}-job"}
 
     def labels(self) -> dict:
         return {
@@ -359,9 +358,6 @@ def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | 
     job = _require_owned(req, kube.get_job(req.src_ns, n["job"]), "Job", n["job"])
     if job is None:
         jobspec.ensure_dependencies(req, n, kube)
-        for kind, getter in (("ConfigMap", kube.get_configmap), ("Secret", kube.get_secret)):
-            name = n["configMap" if kind == "ConfigMap" else "secret"]
-            _require_owned(req, getter(req.src_ns, name), kind, name)
         kube.create_job(req.src_ns, jobspec.worker_job(req, n))
         return None
     for c in (job.get("status") or {}).get("conditions") or []:
@@ -414,6 +410,8 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
             metrics.DURATION.labels(namespace=req.src_ns, source=req.source).observe(
                 (completed - started).total_seconds())
         metrics.observe_result(req.src_ns, req.source, phase, completed.timestamp())
+        if phase == "Succeeded":
+            _sync_records_with_retention(req, kube, name, stored)
         return {"phase": "CleaningUp", "phaseStartedAt": ts(now),
                 "message": f"{phase} recorded as Backup {name}; removing temporary resources"}
 
@@ -432,6 +430,25 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
     kube.patch_cr_status("backups", req.namespace, name, {k: v for k, v in status.items() if v is not None},
                          resource_version=rec["metadata"].get("resourceVersion"))
     return None  # next cycle reads the record back before cleanup starts
+
+
+def _sync_records_with_retention(req: Req, kube, current: str, stored: dict) -> None:
+    """Delete Succeeded Backup records whose restic snapshot was just pruned by retention (#12), so the
+    records list exactly the recovery points that still exist. Only records of the same source and
+    repository are considered, and nothing is deleted unless the worker reported a complete kept list."""
+    retention = (stored.get("artifact") or {}).get("retention") or {}
+    kept = retention.get("kept")
+    if not kept or len(kept) >= 200 or not retention.get("removed"):
+        return
+    repo = (req.spec.get("repository") or {}).get("url")
+    selector = f"{MANAGED_BY[0]}={MANAGED_BY[1]},{LABEL_PREFIX}/source={req.source[:63]}"
+    for rec in kube.list_crs_ns("backups", req.namespace, selector):
+        st, spec = rec.get("status") or {}, rec.get("spec") or {}
+        short = (st.get("artifact") or {}).get("shortId")
+        if (rec["metadata"]["name"] != current and st.get("phase") == "Succeeded" and short
+                and short not in kept and spec.get("repository") == repo and spec.get("source") == req.source):
+            log.info("%s: removing record %s (snapshot %s pruned by retention)", req.key, rec["metadata"]["name"], short)
+            kube.delete_cr("backups", req.namespace, rec["metadata"]["name"], rec["metadata"].get("uid"))
 
 
 def _job_result(req: Req, kube) -> dict:
@@ -462,8 +479,6 @@ def step_cleaning(req: Req, kube, admission: Admission, now: datetime) -> dict |
         ("job", kube.get_job, kube.delete_job),
         ("pvc", kube.get_pvc, kube.delete_pvc),
         ("snapshot", kube.get_snapshot, kube.delete_snapshot),
-        ("secret", kube.get_secret, kube.delete_secret),
-        ("configMap", kube.get_configmap, kube.delete_configmap),
     ):
         obj = getter(ns, n[kind])
         if obj is None or not req.owns(obj):
@@ -486,7 +501,7 @@ def cleanup_all(req: Req, kube) -> list[str]:
     """Delete every object any attempt of this request created (label-selected, ownership-checked).
     Used when a request is deleted mid-run. Returns the names still waiting to disappear."""
     remaining = []
-    for kind in ("job", "pvc", "snapshot", "secret", "configMap"):
+    for kind in ("job", "pvc", "snapshot"):
         for obj in kube.list_owned(kind, req.src_ns, req.selector()):
             if not req.owns(obj):
                 continue

@@ -1,0 +1,13 @@
+# One-off backup (e.g. before an upgrade). The result is recorded as a Backup with the same name.
+apiVersion: backup.techmonkeys.se/v1
+kind: BackupRequest
+metadata:
+  name: my-app-before-upgrade
+  namespace: my-app
+spec:
+  sourcePVC: my-app-data
+  snapshotClass: csi-snapclass
+  plugin: {name: files}
+  repository:
+    url: s3:https://s3.example.com/backups/my-app
+    credentialsSecret: backup-repository

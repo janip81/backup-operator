@@ -66,7 +66,7 @@ spec:
                 required:
                 - sourcePVC
                 - snapshotClass
-                - remotePath
+                - repository
                 properties:
                   sourceNamespace:
                     type: string
@@ -79,33 +79,90 @@ spec:
                     type: string
                     description: StorageClass for the temporary PVC. Defaults to the operator's DEFAULT_STORAGE_CLASS or the
                       cluster default.
-                  remotePath:
-                    type: string
-                  sourcePath:
-                    type: string
-                  retention:
-                    type: integer
-                  transferMethod:
-                    type: string
-                    description: rsync | scp | sftp
-                  customScript:
-                    type: object
-                    description: Use script from ConfigMap or preset.
-                    properties:
-                      preset:
-                        type: string
-                      name:
-                        type: string
-                      namespace:
-                        type: string
-                      key:
-                        type: string
-                        default: backup.sh
                   maxAttempts:
                     type: integer
                     minimum: 1
                     maximum: 10
                     description: 'Attempts before the request is marked Failed (default: operator DEFAULT_MAX_ATTEMPTS).'
+                  plugin:
+                    type: object
+                    description: What to back up from the volume.
+                    default:
+                      name: files
+                    required:
+                    - name
+                    properties:
+                      name:
+                        type: string
+                        enum:
+                        - files
+                        - archives
+                        - sqlite
+                        - custom
+                        description: 'files: whole volume or paths; archives: archives the app writes itself; sqlite: consistent
+                          SQLite copies plus other files; custom: script from configMapRef.'
+                      config:
+                        type: object
+                        description: Plugin settings as strings (camelCase keys become PLUGIN_* variables; lists are comma
+                          separated), e.g. paths, exclude, dir, pattern, newest.
+                        additionalProperties:
+                          type: string
+                      configMapRef:
+                        type: object
+                        description: 'custom plugin: ConfigMap in the source namespace holding the script.'
+                        required:
+                        - name
+                        properties:
+                          name:
+                            type: string
+                          key:
+                            type: string
+                            default: plugin.sh
+                    x-kubernetes-validations:
+                    - rule: self.name != 'custom' || has(self.configMapRef)
+                      message: custom plugin needs configMapRef
+                  repository:
+                    type: object
+                    required:
+                    - url
+                    - credentialsSecret
+                    description: restic repository the snapshots are stored in.
+                    properties:
+                      url:
+                        type: string
+                        description: restic repository, e.g. s3:https://s3.example/bucket/prefix, sftp:user@host:/path, rest:https://host/repo.
+                      credentialsSecret:
+                        type: string
+                        description: 'Secret in the source namespace: RESTIC_PASSWORD (required); AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+                          for S3; ssh-privatekey + known_hosts for SFTP; optional ca.crt.'
+                      initialize:
+                        type: boolean
+                        default: true
+                        description: Create the repository if it doesn't exist yet.
+                      allowInsecure:
+                        type: boolean
+                        default: false
+                        description: Allow plain-http repositories (tests only).
+                  retention:
+                    type: object
+                    description: 'restic retention applied to this source after each successful backup. Empty: keep everything.'
+                    properties:
+                      keepLast:
+                        type: integer
+                        minimum: 1
+                      keepDaily:
+                        type: integer
+                        minimum: 1
+                      keepWeekly:
+                        type: integer
+                        minimum: 1
+                      keepMonthly:
+                        type: integer
+                        minimum: 1
+                  verify:
+                    type: boolean
+                    default: false
+                    description: Read back a sample (5%) of repository data after each backup.
                 description: BackupRequest spec used for every run.
           status:
             type: object

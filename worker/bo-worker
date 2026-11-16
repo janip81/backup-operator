@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# backup-operator worker.
+#   bo-worker backup   run the plugin, store a restic snapshot, apply retention, report a JSON summary
+#   bo-worker restore  restore a snapshot into RESTORE_TARGET
+#
+# Credentials are read from files in $CREDS_DIR (a mounted Secret) and are never written to logs,
+# arguments or the termination message. The summary goes to the container termination message.
+set -euo pipefail
+umask 077
+
+SOURCE_DIR=${SOURCE_DIR:-/source}
+OUTPUT_DIR=${OUTPUT_DIR:-/output}
+CREDS_DIR=${CREDS_DIR:-/etc/backup/creds}
+TERMINATION_LOG=${TERMINATION_LOG:-/dev/termination-log}
+export RESTIC_CACHE_DIR=${RESTIC_CACHE_DIR:-/tmp/restic-cache}
+export HOME=${HOME:-/tmp}
+
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+report() { printf '%s' "$1" > "$TERMINATION_LOG" 2>/dev/null || true; }
+fail() {
+  log "ERROR: $*"
+  report "$(jq -cn --arg e "$*" '{error: $e}')"
+  exit 1
+}
+
+RARGS=()
+
+setup_repository() {
+  [[ -n ${RESTIC_REPOSITORY:-} ]] || fail "RESTIC_REPOSITORY is not set"
+  [[ -s $CREDS_DIR/RESTIC_PASSWORD ]] || fail "credentials: RESTIC_PASSWORD is missing"
+  export RESTIC_PASSWORD_FILE=$CREDS_DIR/RESTIC_PASSWORD
+  if [[ -s $CREDS_DIR/AWS_ACCESS_KEY_ID ]]; then
+    AWS_ACCESS_KEY_ID=$(<"$CREDS_DIR/AWS_ACCESS_KEY_ID"); export AWS_ACCESS_KEY_ID
+  fi
+  if [[ -s $CREDS_DIR/AWS_SECRET_ACCESS_KEY ]]; then
+    AWS_SECRET_ACCESS_KEY=$(<"$CREDS_DIR/AWS_SECRET_ACCESS_KEY"); export AWS_SECRET_ACCESS_KEY
+  fi
+  if [[ -s $CREDS_DIR/ca.crt ]]; then
+    export RESTIC_CACERT=$CREDS_DIR/ca.crt
+  fi
+
+  case $RESTIC_REPOSITORY in
+    s3:http://*|rest:http://*)
+      # Plain HTTP would send data and credentials unauthenticated; only for explicit test setups.
+      [[ ${ALLOW_INSECURE:-false} == true ]] || fail "refusing a plain-http repository (set allowInsecure for tests only)"
+      ;;
+    sftp:*)
+      [[ -s $CREDS_DIR/ssh-privatekey ]] || fail "credentials: sftp needs ssh-privatekey"
+      [[ -s $CREDS_DIR/known_hosts ]] || fail "credentials: sftp needs known_hosts (host keys are always verified)"
+      local target=${RESTIC_REPOSITORY#sftp:}
+      target=${target%%:*}
+      cp "$CREDS_DIR/ssh-privatekey" /tmp/.ssh-key && chmod 0400 /tmp/.ssh-key
+      RARGS+=(-o "sftp.command=ssh -i /tmp/.ssh-key -o UserKnownHostsFile=$CREDS_DIR/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes -o IdentitiesOnly=yes $target -s sftp")
+      ;;
+  esac
+
+  if ! restic "${RARGS[@]}" cat config >/dev/null 2>/tmp/restic-config.err; then
+    if [[ ${INIT_REPOSITORY:-true} == true ]] && grep -qiE 'not exist|no such file|unable to open config' /tmp/restic-config.err; then
+      log "initializing new repository"
+      restic "${RARGS[@]}" init >/dev/null || fail "could not initialize the repository"
+    else
+      fail "repository is not reachable or the password is wrong: $(head -c 300 /tmp/restic-config.err)"
+    fi
+  fi
+}
+
+run_plugin() {
+  local plugin=${PLUGIN:-files} script
+  case $plugin in
+    custom) script=/plugin-custom/plugin.sh ;;
+    *) script=/plugins/$plugin.sh ;;
+  esac
+  [[ $plugin =~ ^[a-z0-9-]+$ && -r $script ]] || fail "unknown plugin: $plugin"
+  log "running plugin $plugin"
+  SOURCE_DIR=$SOURCE_DIR OUTPUT_DIR=$OUTPUT_DIR bash "$script" || fail "plugin $plugin failed"
+}
+
+backup() {
+  : "${BACKUP_SOURCE:?BACKUP_SOURCE is required}"
+  [[ -d $SOURCE_DIR ]] || fail "source directory $SOURCE_DIR is missing"
+  mkdir -p "$OUTPUT_DIR" "$RESTIC_CACHE_DIR"
+  setup_repository
+  run_plugin
+
+  local list=/tmp/backup-paths excludes=/tmp/backup-excludes
+  : > "$list"
+  if [[ -f $OUTPUT_DIR/.backup-paths ]]; then
+    grep -v '^$' "$OUTPUT_DIR/.backup-paths" >> "$list" || true
+  fi
+  if find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 ! -name '.backup-*' ! -name '.work' | grep -q .; then
+    echo "$OUTPUT_DIR" >> "$list"
+  fi
+  [[ -s $list ]] || fail "plugin selected nothing to back up"
+  {
+    printf '%s\n' "$OUTPUT_DIR/.backup-*" "$OUTPUT_DIR/.work"
+    if [[ -f $OUTPUT_DIR/.backup-excludes ]]; then cat "$OUTPUT_DIR/.backup-excludes"; fi
+  } > "$excludes"
+
+  log "storing snapshot"
+  local out=/tmp/backup.json rc=0
+  restic "${RARGS[@]}" backup --json --host "${BACKUP_HOST:-backup-operator}" \
+      --tag "source=$BACKUP_SOURCE" --tag "request=${BACKUP_REQUEST:-manual}" \
+      --files-from-verbatim "$list" --exclude-file "$excludes" > "$out" || rc=$?
+  if [[ $rc -eq 3 && ${ALLOW_PARTIAL:-false} != true ]]; then
+    fail "some files could not be read; snapshot is incomplete (exit 3)"
+  elif [[ $rc -ne 0 && $rc -ne 3 ]]; then
+    fail "restic backup failed (exit $rc)"
+  fi
+  local summary id
+  summary=$(jq -c 'select(.message_type == "summary")' "$out" | tail -n1)
+  [[ -n $summary ]] || fail "restic produced no summary"
+  id=$(jq -r '.snapshot_id' <<< "$summary")
+  restic "${RARGS[@]}" snapshots --json "$id" | jq -e 'length == 1' >/dev/null || fail "snapshot $id not found after backup"
+
+  local verified=false
+  if [[ ${VERIFY:-false} == true ]]; then
+    log "verifying repository data (${VERIFY_SUBSET:-5%})"
+    restic "${RARGS[@]}" check --read-data-subset="${VERIFY_SUBSET:-5%}" >/dev/null || fail "repository check failed"
+    verified=true
+  fi
+
+  # Retention runs only after a successful backup, so the newest good snapshot is always kept.
+  local retention='null' policy=()
+  if [[ -n ${KEEP_LAST:-} ]]; then policy+=(--keep-last "$KEEP_LAST"); fi
+  if [[ -n ${KEEP_DAILY:-} ]]; then policy+=(--keep-daily "$KEEP_DAILY"); fi
+  if [[ -n ${KEEP_WEEKLY:-} ]]; then policy+=(--keep-weekly "$KEEP_WEEKLY"); fi
+  if [[ -n ${KEEP_MONTHLY:-} ]]; then policy+=(--keep-monthly "$KEEP_MONTHLY"); fi
+  if [[ ${#policy[@]} -gt 0 ]]; then
+    log "applying retention ${policy[*]}"
+    local fj=/tmp/forget.json
+    restic "${RARGS[@]}" forget --json --group-by host --host "${BACKUP_HOST:-backup-operator}" \
+        --tag "source=$BACKUP_SOURCE" "${policy[@]}" > "$fj" || fail "retention (forget) failed"
+    retention=$(jq -c '{kept: ([.[].keep[]?.short_id] | .[:200]), removed: ([.[].remove[]?] | length)}' "$fj")
+    if [[ $(jq -r .removed <<< "$retention") -gt 0 ]]; then
+      restic "${RARGS[@]}" prune >/dev/null || fail "retention (prune) failed"
+    fi
+  fi
+
+  local result
+  result=$(jq -c --arg plugin "${PLUGIN:-files}" --argjson verified "$verified" --argjson retention "$retention" '{
+      plugin: $plugin, snapshotId: .snapshot_id, shortId: .snapshot_id[0:8],
+      filesNew: .files_new, filesChanged: .files_changed, filesUnmodified: .files_unmodified,
+      bytesAdded: .data_added, totalFiles: .total_files_processed, totalBytes: .total_bytes_processed,
+      verified: $verified, retention: $retention}' <<< "$summary")
+  report "$result"
+  log "done: snapshot ${id:0:8}"
+}
+
+# Restore layout: /source holds the volume's files; /output/volume holds plugin-made copies (e.g. consistent
+# SQLite databases) that belong at the same relative paths and are laid over the volume files.
+restore() {
+  : "${RESTORE_TARGET:?RESTORE_TARGET is required}"
+  setup_repository
+  local snap=${RESTORE_SNAPSHOT:-latest} filter=()
+  if [[ $snap == latest && -n ${BACKUP_SOURCE:-} ]]; then filter=(--tag "source=$BACKUP_SOURCE"); fi
+  local id
+  id=$(restic "${RARGS[@]}" snapshots --json --latest 1 "${filter[@]}" ${snap/#latest/} | jq -r '.[-1].id // empty')
+  [[ -n $id ]] || fail "snapshot $snap not found"
+  local restored=0 sub
+  for sub in "${RESTORE_SUBPATH:-/source}" "$OUTPUT_DIR/volume"; do
+    if restic "${RARGS[@]}" ls "$id" "$sub" >/dev/null 2>&1 && [[ -n $(restic "${RARGS[@]}" ls --json "$id" "$sub" | jq -r 'select(.path != null) | .path' | head -n1) ]]; then
+      log "restoring ${id:0:8}:$sub into $RESTORE_TARGET"
+      restic "${RARGS[@]}" restore "$id:$sub" --target "$RESTORE_TARGET" >/dev/null || fail "restore of $sub failed"
+      restored=$((restored + 1))
+    fi
+  done
+  [[ $restored -gt 0 ]] || fail "snapshot ${id:0:8} contains nothing to restore"
+  # Plugin copies were written by the worker; give them back their original owner and mode.
+  if restic "${RARGS[@]}" dump "$id" "$OUTPUT_DIR/volume.owners" > /tmp/volume.owners 2>/dev/null; then
+    local meta rel uid gid mode
+    while IFS=$'\t' read -r meta rel; do
+      read -r uid gid mode <<< "$meta"
+      [[ -n $rel && $rel != *..* && -e $RESTORE_TARGET/$rel ]] || continue
+      chown "$uid:$gid" "$RESTORE_TARGET/$rel" && chmod "$mode" "$RESTORE_TARGET/$rel" \
+        || fail "could not restore owner/mode of $rel"
+    done < /tmp/volume.owners
+  fi
+  report "$(jq -cn --arg s "$id" '{restored: $s}')"
+}
+
+case ${1:-backup} in
+  backup) backup ;;
+  restore) restore ;;
+  *) fail "usage: bo-worker backup|restore" ;;
+esac

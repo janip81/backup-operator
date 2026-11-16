@@ -12,7 +12,8 @@ T0 = datetime(2026, 11, 17, 3, 0, tzinfo=UTC)
 
 def make_req(name="r1", pvc="data", ns="app", uid="0123456789abcdef", **spec):
     return {"metadata": {"name": name, "namespace": ns, "uid": uid},
-            "spec": {"sourcePVC": pvc, "snapshotClass": "snap", "remotePath": "x", **spec},
+            "spec": {"sourcePVC": pvc, "snapshotClass": "snap",
+                     "repository": {"url": "s3:https://s3.example/bucket", "credentialsSecret": "creds"}, **spec},
             "status": {}}
 
 
@@ -56,7 +57,8 @@ def test_happy_path_uses_deterministic_names_and_cleans_up(kube, adm):
     assert body["status"]["phase"] == "Succeeded"
     assert kube.created["snapshot"] == ["bo-01234567-a1-snap"]
     assert kube.created["job"] == ["bo-01234567-a1-job"]
-    assert not kube.objs["snapshot"] and not kube.objs["job"] and not kube.objs["secret"] and not kube.objs["configMap"]
+    assert not kube.objs["snapshot"] and not kube.objs["job"]
+    assert not kube.created["secret"] and not kube.created["configMap"]  # nothing is copied any more
     # only the source PVCs are left
     assert set(kube.objs["pvc"]) == {("app", "data"), ("app", "other")}
     assert kube.objs["backups"][("app", "r1")]["status"]["phase"] == "Succeeded"
@@ -293,7 +295,7 @@ def test_two_runs_same_namespace_dont_touch_each_others_objects(kube, adm, monke
         now += timedelta(seconds=10)
     assert a["status"]["phase"] == "Failed"
     b_names = engine.Req.from_body(b).names()
-    for kind in ("job", "pvc", "snapshot", "secret", "configMap"):
+    for kind in ("job", "pvc", "snapshot"):
         assert ("app", b_names[kind]) in kube.objs[kind], kind
     kube.job_result = "Complete"
     run([b], kube, adm, now)
@@ -337,13 +339,13 @@ def test_reconcile_skips_requests_being_deleted(kube, adm):
 
 def test_cleanup_never_deletes_a_replacement_with_the_same_name(kube):
     req = engine.Req.from_body(make_req(uid="aaaaaaaa1"))
-    name = req.names()["configMap"]
-    kube.objs["configMap"][("app", name)] = {"metadata": {"name": name, "uid": "old", "labels": req.labels()}}
-    listed = kube.list_owned("configMap", "app", req.selector())
+    name = req.names()["job"]
+    kube.objs["job"][("app", name)] = {"metadata": {"name": name, "uid": "old", "labels": req.labels()}}
+    listed = kube.list_owned("job", "app", req.selector())
     # between list and delete, the owned object is replaced by a foreign one with the same name
-    kube.objs["configMap"][("app", name)] = {"metadata": {"name": name, "uid": "new", "labels": {}}}
-    kube.delete("configMap", "app", name, listed[0]["metadata"]["uid"])
-    assert kube.objs["configMap"][("app", name)]["metadata"]["uid"] == "new"
+    kube.objs["job"][("app", name)] = {"metadata": {"name": name, "uid": "new", "labels": {}}}
+    kube.delete("job", "app", name, listed[0]["metadata"]["uid"])
+    assert kube.objs["job"][("app", name)]["metadata"]["uid"] == "new"
 
 
 def test_cleanup_uses_recorded_source_namespace(kube):
@@ -581,3 +583,71 @@ def test_record_replaced_between_read_and_write_is_not_overwritten(kube, adm):
     rec = kube.objs["backups"][("app", "r1")]
     assert rec["spec"]["requestRef"]["uid"] == "intruder" and rec["status"] == {"phase": "Failed"}
     assert ("app", engine.Req.from_body(body).names()["job"]) in kube.objs["job"]  # no cleanup
+
+
+# --- #12: restic worker job, plugins, credentials, record retention ---
+
+def _job(kube):
+    return next(iter(kube.objs["job"].values()))
+
+
+def _env(job):
+    return {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+
+def test_worker_job_runs_plugin_against_repository(kube, adm):
+    kube.job_result = None
+    body = make_req(plugin={"name": "archives", "config": {"dir": "backups", "newest": "3"}},
+                    retention={"keepLast": 7, "keepWeekly": 4}, verify=True)
+    run([body], kube, adm, T0, cycles=8)
+    job = _job(kube)
+    env = _env(job)
+    assert env["PLUGIN"] == "archives" and env["PLUGIN_DIR"] == "backups" and env["PLUGIN_NEWEST"] == "3"
+    assert env["RESTIC_REPOSITORY"] == "s3:https://s3.example/bucket" and env["KEEP_LAST"] == "7"
+    assert env["KEEP_WEEKLY"] == "4" and env["VERIFY"] == "true" and env["BACKUP_SOURCE"] == "data"
+    pod = job["spec"]["template"]["spec"]
+    creds = next(v for v in pod["volumes"] if v["name"] == "creds")
+    assert creds["secret"]["secretName"] == "creds"  # referenced in the source namespace, never copied
+    assert not any("PASSWORD" in e or "SECRET" in e for e in env)  # credentials only as files
+    sc = pod["containers"][0]["securityContext"]
+    assert sc["capabilities"] == {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]}
+    assert sc["readOnlyRootFilesystem"] and not sc["allowPrivilegeEscalation"]
+    assert pod["automountServiceAccountToken"] is False
+
+
+def test_custom_plugin_mounts_configmap_from_source_namespace(kube, adm):
+    kube.job_result = None
+    body = make_req(plugin={"name": "custom", "configMapRef": {"name": "my-plugin"}})
+    run([body], kube, adm, T0, cycles=8)
+    vols = {v["name"]: v for v in _job(kube)["spec"]["template"]["spec"]["volumes"]}
+    assert vols["plugin"]["configMap"]["name"] == "my-plugin"
+
+
+@pytest.mark.parametrize("spec,reason", [
+    ({"repository": {"url": "s3:https://x/b", "credentialsSecret": "missing"}}, "CredentialsNotFound"),
+    ({"plugin": {"name": "custom", "configMapRef": {"name": "nope"}}}, "PluginNotFound"),
+    ({"plugin": {"name": "files", "config": {"bad-key": "x"}}}, "InvalidPluginConfig"),
+])
+def test_missing_dependencies_fail_terminally_before_the_job(kube, adm, spec, reason):
+    body = make_req(maxAttempts=3, **spec)
+    run([body], kube, adm, T0)
+    assert body["status"]["phase"] == "Failed" and body["status"]["reason"] == reason
+    assert kube.created["job"] == [] and not kube.objs["snapshot"]
+
+
+def test_records_follow_restic_retention(kube, adm):
+    def record(name, short, repo="s3:https://s3.example/bucket", source="data"):
+        kube.objs["backups"][("app", name)] = {
+            "metadata": {"name": name, "uid": f"u-{name}", "labels": {
+                "app.kubernetes.io/managed-by": "backup-operator", "backup.techmonkeys.se/source": source}},
+            "spec": {"source": source, "repository": repo},
+            "status": {"phase": "Succeeded", "artifact": {"shortId": short}}}
+    record("old1", "aaaa0001")
+    record("old2", "aaaa0002")
+    record("other-repo", "aaaa0003", repo="s3:https://elsewhere/b")
+    kube.termination_message = ('{"shortId": "bbbb0001", "retention": {"kept": ["bbbb0001", "aaaa0002"], '
+                                '"removed": 1}}')
+    body = make_req()
+    run([body], kube, adm, T0)
+    names = sorted(n for (_, n) in kube.objs["backups"])
+    assert names == ["old2", "other-repo", "r1"]  # old1's snapshot was pruned; other repositories untouched

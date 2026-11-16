@@ -1,0 +1,20 @@
+# Apps that keep state in SQLite: consistent database copies (WAL applied, integrity-checked) plus
+# every other file on the volume.
+apiVersion: backup.techmonkeys.se/v1
+kind: BackupSchedule
+metadata:
+  name: zigbee
+  namespace: zigbee
+spec:
+  schedule: "30 3 * * *"
+  template:
+    sourcePVC: zigbee-data
+    snapshotClass: csi-snapclass
+    plugin:
+      name: sqlite
+      config: {pattern: "*.db", exclude: "/log"}
+    repository:
+      url: sftp:backup@nas.example:/srv/restic/zigbee
+      credentialsSecret: backup-repository
+    retention: {keepDaily: 14}
+    verify: true

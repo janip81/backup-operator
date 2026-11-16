@@ -20,8 +20,8 @@ class FakeKube:
         self.wffc = False
         self.hooks = {}  # method name -> callable(*args) that may raise
         self.termination_message = '{"snapshotId": "abc123", "filesNew": 3}'
-        self.cms = {("backup-operator", "rsync-snapshot-default-backup-script"): {"data": {"backup.sh": "echo hi"}}}
-        self.secrets = {("backup-operator", "backup-ssh-key"): {"data": {"ssh_key": "a2V5"}}}
+        self.cms = {("app", "my-plugin"): {"data": {"plugin.sh": "echo hi"}}}
+        self.secrets = {("app", "creds"): {"data": {"RESTIC_PASSWORD": "cHc="}}}
 
     # --- helpers ---
     def _tick(self):

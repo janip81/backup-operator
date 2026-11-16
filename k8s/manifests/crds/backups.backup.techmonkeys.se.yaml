@@ -49,6 +49,7 @@ spec:
                 type: string
               method:
                 type: string
+                description: Deprecated (v0.3 records).
               targetNamespace:
                 type: string
                 description: Deprecated (v0.3 records).
@@ -56,6 +57,11 @@ spec:
                 type: object
                 description: Deprecated (v0.3 records).
                 x-kubernetes-preserve-unknown-fields: true
+              plugin:
+                type: string
+              repository:
+                type: string
+                description: restic repository URL (no credentials).
           status:
             type: object
             description: Result of the run, written before temporary objects are removed.

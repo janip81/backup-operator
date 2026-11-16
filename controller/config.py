@@ -10,10 +10,14 @@ GROUP = "backup.techmonkeys.se"
 VERSION = "v1"
 
 WORKER_IMAGE = os.getenv("WORKER_IMAGE", "ghcr.io/janip81/backup-operator-worker:0.4.0")
-SERVICE_ACCOUNT = os.getenv("SERVICE_ACCOUNT", "backup-runner")
 IMAGE_PULL_SECRET = os.getenv("IMAGE_PULL_SECRET", "")
 DEFAULT_STORAGE = os.getenv("DEFAULT_STORAGE_CLASS", "")
-MOUNT_PATH = os.getenv("MOUNT_PATH", "/mnt/source")
+WORKER_OUTPUT_LIMIT = os.getenv("WORKER_OUTPUT_LIMIT", "10Gi")  # plugin output (e.g. SQLite copies)
+WORKER_TMP_LIMIT = os.getenv("WORKER_TMP_LIMIT", "2Gi")  # restic cache and scratch
+WORKER_RESOURCES = {
+    "requests": {"cpu": os.getenv("WORKER_CPU_REQUEST", "100m"), "memory": os.getenv("WORKER_MEMORY_REQUEST", "256Mi")},
+    "limits": {"memory": os.getenv("WORKER_MEMORY_LIMIT", "1Gi")},
+}
 OPERATOR_NAMESPACE = os.getenv("OPERATOR_NAMESPACE", "backup-operator")
 
 # --- Load and retry bounds (#8) ---
