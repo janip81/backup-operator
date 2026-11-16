@@ -9,9 +9,10 @@ PY_IMG=python:3.13-slim
 tmp=$(mktemp -d)
 id=$$
 repo=bo-test-repo-$id
+repo_nonroot=bo-test-repo-nonroot-$id
 restore_vol=bo-test-restore-$id
 cleanup() {
-  docker volume rm -f "$repo" "$restore_vol" >/dev/null 2>&1 || true
+  docker volume rm -f "$repo" "$repo_nonroot" "$restore_vol" >/dev/null 2>&1 || true
   rm -rf -- "${tmp:?}"
 }
 trap cleanup EXIT
@@ -108,7 +109,7 @@ chmod 0644 "$tmp/creds/RESTIC_PASSWORD"   # without the capability, only the 000
 NO_READ_CAP=1 worker "$src" PLUGIN=files -- backup >/dev/null 2>&1 && die "partial backup accepted"
 NO_READ_CAP=1 worker "$src" PLUGIN=files ALLOW_PARTIAL=true -- backup >/dev/null 2>&1 && die "partial accepted via ALLOW_PARTIAL"
 chmod 0600 "$tmp/creds/RESTIC_PASSWORD"
-[[ $(msg | jq -r .error) == *"incomplete"* ]] || die "partial error: $(msg)"
+[[ $(msg | jq -r .error) == backup-incomplete ]] || die "partial error: $(msg)"
 reset_restore
 worker "$src" RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore after partial"; }
 [[ $(restored_hashes) == "$h2" ]] || die "latest after a partial backup is not the last complete snapshot"
@@ -159,7 +160,7 @@ files=$(restored_hashes | awk '{print $2}' | tr '\n' ' ')
 ok "archives plugin backs up only the app's archives"
 mkdir -p "$tmp/src3/backups"
 worker "$tmp/src3" PLUGIN=archives BACKUP_SOURCE=empty -- backup >/dev/null 2>&1 && die "empty archive dir accepted"
-[[ $(msg | jq -r .error) == *"plugin archives failed"* ]] || die "empty archives error: $(msg)"
+[[ $(msg | jq -r .error) == plugin-failed ]] || die "empty archives error: $(msg)"
 ok "archives plugin fails loudly when the app wrote no archives"
 
 # ---------------------------------------------------------------- sqlite plugin with an uncheckpointed WAL
@@ -190,10 +191,10 @@ ok "sqlite plugin restores a consistent database (WAL-only rows, original owner 
 
 # ---------------------------------------------------------------- fail closed, no secrets in output
 out=$(worker "$src2" RESTIC_REPOSITORY=s3:http://minio.invalid/bucket -- backup 2>&1) && die "plain http accepted"
-[[ $(msg | jq -r .error) == *"plain-http"* ]] || die "http error: $(msg)"
+[[ $(msg | jq -r .error) == insecure-repository ]] || die "http error: $(msg)"
 ok "plain-http repository is refused"
 worker "$src2" RESTIC_REPOSITORY=sftp:backup@nas.invalid:/srv/repo -- backup >/dev/null 2>&1 && die "sftp w/o keys accepted"
-[[ $(msg | jq -r .error) == *"ssh-privatekey"* ]] || die "sftp error: $(msg)"
+[[ $(msg | jq -r .error) == credentials-missing ]] || die "sftp error: $(msg)"
 ok "sftp without key and known_hosts is refused"
 mv "$tmp/creds/RESTIC_PASSWORD" "$tmp/pw"
 worker "$src2" -- backup >/dev/null 2>&1 && die "missing password accepted"
@@ -204,5 +205,24 @@ out=$(worker "$src2" -- backup 2>&1) && die "wrong password accepted"
 printf 'correct horse battery staple' > "$tmp/creds/RESTIC_PASSWORD"
 if grep -q "Zq9-not-the-password-7Xv\|correct horse" <<< "$out$(msg)"; then die "password leaked into output"; fi
 ok "wrong password fails without printing the password"
+
+# termination messages carry only fixed error codes, never tool output
+[[ $(msg | jq -c 'keys') == '["error"]' && $(msg | jq -r .error) =~ ^[a-z-]+$ ]] || die "termination message: $(msg)"
+ok "termination message holds only a fixed error code"
+
+# non-root mode (spec.worker.runAsUser): no capabilities; credentials and data readable via the group
+src5=$tmp/src5; mkdir -p "$src5"; echo "group readable" > "$src5/data.txt"
+chmod 0750 "$src5"; chmod 0640 "$src5/data.txt" "$tmp/creds/RESTIC_PASSWORD"
+rm -f -- "$tmp/term/msg"
+docker volume create "$repo_nonroot" >/dev/null   # a local repo needs file permissions for 4242 (S3 has none)
+docker run --rm --user 0 -v "$repo_nonroot:/r" --entrypoint chown "$IMG" 4242 /r
+docker run --rm --read-only --tmpfs /tmp:mode=1777 --tmpfs /output:mode=1777 --user "4242:$(id -g)" --cap-drop ALL \
+  --security-opt no-new-privileges --network none \
+  -v "$src5:/source:ro" -v "$repo_nonroot:/repo" -v "$tmp/creds:/etc/backup/creds:ro" -v "$tmp/term:/term" \
+  -e RESTIC_REPOSITORY=/repo -e TERMINATION_LOG=/term/msg -e BACKUP_SOURCE=nonroot -e BACKUP_HOST=app \
+  "$IMG" backup >/dev/null 2>&1 && nonroot_rc=0 || nonroot_rc=$?
+chmod 0600 "$tmp/creds/RESTIC_PASSWORD"
+[[ $nonroot_rc == 0 ]] || { msg; die "non-root backup failed"; }
+ok "non-root worker without capabilities backs up via group permissions"
 
 echo "# $pass passed"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -454,8 +455,34 @@ def _sync_records_with_retention(req: Req, kube, current: str, stored: dict) -> 
             kube.delete_cr("backups", req.namespace, rec["metadata"]["name"], rec["metadata"].get("uid"))
 
 
-ARTIFACT_FIELDS = ("plugin", "snapshotId", "shortId", "filesNew", "filesChanged", "filesUnmodified", "bytesAdded",
-                   "totalFiles", "totalBytes", "verified", "retention", "error")
+_HEX = re.compile(r"^[0-9a-f]{8,64}$")
+_CODE = re.compile(r"^[a-z][a-z-]{1,40}$")
+_PLUGINS = ("files", "archives", "sqlite", "custom")
+
+
+def sanitize_artifact(raw: dict) -> dict:
+    """Keep only well-formed, known fields of the worker summary (#13): IDs must be hex, counters
+    non-negative integers, the error a short fixed code. Anything else from the pod is dropped."""
+    out: dict = {}
+    for key in ("snapshotId", "shortId"):
+        if isinstance(raw.get(key), str) and _HEX.match(raw[key]):
+            out[key] = raw[key]
+    for key in ("filesNew", "filesChanged", "filesUnmodified", "bytesAdded", "totalFiles", "totalBytes"):
+        if isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool) and raw[key] >= 0:
+            out[key] = raw[key]
+    if raw.get("plugin") in _PLUGINS:
+        out["plugin"] = raw["plugin"]
+    if isinstance(raw.get("verified"), bool):
+        out["verified"] = raw["verified"]
+    if isinstance(raw.get("error"), str) and _CODE.match(raw["error"]):
+        out["error"] = raw["error"]
+    ret = raw.get("retention")
+    if isinstance(ret, dict):
+        kept = [k for k in ret.get("kept") or [] if isinstance(k, str) and _HEX.match(k)][:200]
+        removed = ret.get("removed")
+        if isinstance(removed, int) and not isinstance(removed, bool) and removed >= 0:
+            out["retention"] = {"kept": kept, "removed": removed}
+    return out
 
 
 def _job_result(req: Req, kube) -> dict:
@@ -473,8 +500,7 @@ def _job_result(req: Req, kube) -> dict:
             except ValueError:
                 parsed = None
             if isinstance(parsed, dict):
-                # Only known fields of the worker summary are stored; nothing else from the pod is kept.
-                out["artifact"] = {k: v for k, v in parsed.items() if k in ARTIFACT_FIELDS}
+                out["artifact"] = sanitize_artifact(parsed)
             return out
     return {}
 

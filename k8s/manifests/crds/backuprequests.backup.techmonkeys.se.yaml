@@ -91,10 +91,14 @@ spec:
                   url:
                     type: string
                     description: restic repository, e.g. s3:https://s3.example/bucket/prefix, sftp:user@host:/path, rest:https://host/repo.
+                      Credentials are never part of the URL; they come from credentialsSecret.
+                    pattern: ^(?:(?:s3|rest):https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/-]*)?|sftp:[a-z_][a-z0-9_.-]{0,31}@[A-Za-z0-9.-]+:/[A-Za-z0-9._~/-]*)$
+                    maxLength: 512
                   credentialsSecret:
                     type: string
                     description: 'Secret in the source namespace: RESTIC_PASSWORD (required); AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
-                      for S3; ssh-privatekey + known_hosts for SFTP; optional ca.crt.'
+                      for S3; RESTIC_REST_USERNAME/RESTIC_REST_PASSWORD for a REST server; ssh-privatekey + known_hosts for
+                      SFTP; optional ca.crt.'
                   initialize:
                     type: boolean
                     default: true

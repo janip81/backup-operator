@@ -17,23 +17,32 @@ export HOME=${HOME:-/tmp}
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 report() { printf '%s' "$1" > "$TERMINATION_LOG" 2>/dev/null || true; }
+# fail CODE MESSAGE: the message goes to the container log only; the termination message (stored in the
+# Backup record) carries just the fixed error code, never tool output or configuration values (#13).
 fail() {
-  log "ERROR: $*"
-  report "$(jq -cn --arg e "$*" '{error: $e}')"
+  local code=$1; shift
+  log "ERROR [$code]: $*"
+  report "$(jq -cn --arg e "$code" '{error: $e}')"
   exit 1
 }
 
 RARGS=()
 
 setup_repository() {
-  [[ -n ${RESTIC_REPOSITORY:-} ]] || fail "RESTIC_REPOSITORY is not set"
-  [[ -s $CREDS_DIR/RESTIC_PASSWORD ]] || fail "credentials: RESTIC_PASSWORD is missing"
+  [[ -n ${RESTIC_REPOSITORY:-} ]] || fail config-missing "RESTIC_REPOSITORY is not set"
+  [[ -s $CREDS_DIR/RESTIC_PASSWORD ]] || fail credentials-missing "RESTIC_PASSWORD is missing"
   export RESTIC_PASSWORD_FILE=$CREDS_DIR/RESTIC_PASSWORD
   if [[ -s $CREDS_DIR/AWS_ACCESS_KEY_ID ]]; then
     AWS_ACCESS_KEY_ID=$(<"$CREDS_DIR/AWS_ACCESS_KEY_ID"); export AWS_ACCESS_KEY_ID
   fi
   if [[ -s $CREDS_DIR/AWS_SECRET_ACCESS_KEY ]]; then
     AWS_SECRET_ACCESS_KEY=$(<"$CREDS_DIR/AWS_SECRET_ACCESS_KEY"); export AWS_SECRET_ACCESS_KEY
+  fi
+  if [[ -s $CREDS_DIR/RESTIC_REST_USERNAME ]]; then
+    RESTIC_REST_USERNAME=$(<"$CREDS_DIR/RESTIC_REST_USERNAME"); export RESTIC_REST_USERNAME
+  fi
+  if [[ -s $CREDS_DIR/RESTIC_REST_PASSWORD ]]; then
+    RESTIC_REST_PASSWORD=$(<"$CREDS_DIR/RESTIC_REST_PASSWORD"); export RESTIC_REST_PASSWORD
   fi
   if [[ -s $CREDS_DIR/ca.crt ]]; then
     export RESTIC_CACERT=$CREDS_DIR/ca.crt
@@ -42,11 +51,11 @@ setup_repository() {
   case $RESTIC_REPOSITORY in
     s3:http://*|rest:http://*)
       # Plain HTTP would send data and credentials unauthenticated; only for explicit test setups.
-      [[ ${ALLOW_INSECURE:-false} == true ]] || fail "refusing a plain-http repository (set allowInsecure for tests only)"
+      [[ ${ALLOW_INSECURE:-false} == true ]] || fail insecure-repository "refusing a plain-http repository (set allowInsecure for tests only)"
       ;;
     sftp:*)
-      [[ -s $CREDS_DIR/ssh-privatekey ]] || fail "credentials: sftp needs ssh-privatekey"
-      [[ -s $CREDS_DIR/known_hosts ]] || fail "credentials: sftp needs known_hosts (host keys are always verified)"
+      [[ -s $CREDS_DIR/ssh-privatekey ]] || fail credentials-missing "sftp needs ssh-privatekey"
+      [[ -s $CREDS_DIR/known_hosts ]] || fail credentials-missing "sftp needs known_hosts (host keys are always verified)"
       local target=${RESTIC_REPOSITORY#sftp:}
       target=${target%%:*}
       cp "$CREDS_DIR/ssh-privatekey" /tmp/.ssh-key && chmod 0400 /tmp/.ssh-key
@@ -57,9 +66,10 @@ setup_repository() {
   if ! restic "${RARGS[@]}" cat config >/dev/null 2>/tmp/restic-config.err; then
     if [[ ${INIT_REPOSITORY:-true} == true ]] && grep -qiE 'not exist|no such file|unable to open config' /tmp/restic-config.err; then
       log "initializing new repository"
-      restic "${RARGS[@]}" init >/dev/null || fail "could not initialize the repository"
+      restic "${RARGS[@]}" init >/dev/null || fail repository-init-failed "could not initialize the repository"
     else
-      fail "repository is not reachable or the password is wrong: $(head -c 300 /tmp/restic-config.err)"
+      cat /tmp/restic-config.err >&2
+      fail repository-unavailable "repository is not reachable or the password is wrong"
     fi
   fi
 }
@@ -70,14 +80,14 @@ run_plugin() {
     custom) script=/plugin-custom/plugin.sh ;;
     *) script=/plugins/$plugin.sh ;;
   esac
-  [[ $plugin =~ ^[a-z0-9-]+$ && -r $script ]] || fail "unknown plugin: $plugin"
+  [[ $plugin =~ ^[a-z0-9-]+$ && -r $script ]] || fail unknown-plugin "unknown plugin: $plugin"
   log "running plugin $plugin"
-  SOURCE_DIR=$SOURCE_DIR OUTPUT_DIR=$OUTPUT_DIR bash "$script" || fail "plugin $plugin failed"
+  SOURCE_DIR=$SOURCE_DIR OUTPUT_DIR=$OUTPUT_DIR bash "$script" || fail plugin-failed "plugin $plugin failed"
 }
 
 backup() {
   : "${BACKUP_SOURCE:?BACKUP_SOURCE is required}"
-  [[ -d $SOURCE_DIR ]] || fail "source directory $SOURCE_DIR is missing"
+  [[ -d $SOURCE_DIR ]] || fail source-missing "source directory $SOURCE_DIR is missing"
   mkdir -p "$OUTPUT_DIR" "$RESTIC_CACHE_DIR"
   setup_repository
   run_plugin
@@ -90,7 +100,7 @@ backup() {
   if find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 ! -name '.backup-*' ! -name '.work' | grep -q .; then
     echo "$OUTPUT_DIR" >> "$list"
   fi
-  [[ -s $list ]] || fail "plugin selected nothing to back up"
+  [[ -s $list ]] || fail nothing-selected "plugin selected nothing to back up"
   {
     printf '%s\n' "$OUTPUT_DIR/.backup-*" "$OUTPUT_DIR/.work"
     if [[ -f $OUTPUT_DIR/.backup-excludes ]]; then cat "$OUTPUT_DIR/.backup-excludes"; fi
@@ -111,27 +121,27 @@ backup() {
   [[ -n $summary ]] && id=$(jq -r '.snapshot_id // empty' <<< "$summary")
   # A partial snapshot (exit 3: some files unreadable) is never accepted.
   if [[ $rc -eq 3 ]]; then
-    discard "$id"; fail "some files could not be read; snapshot is incomplete (exit 3)"
+    discard "$id"; fail backup-incomplete "some files could not be read; snapshot is incomplete (exit 3)"
   elif [[ $rc -ne 0 ]]; then
-    discard "$id"; fail "restic backup failed (exit $rc)"
+    discard "$id"; fail backup-failed "restic backup failed (exit $rc)"
   fi
-  [[ -n $id ]] || fail "restic produced no summary"
-  restic "${RARGS[@]}" snapshots --json "$id" | jq -e 'length == 1' >/dev/null || fail "snapshot $id not found after backup"
+  [[ -n $id ]] || fail backup-failed "restic produced no summary"
+  restic "${RARGS[@]}" snapshots --json "$id" | jq -e 'length == 1' >/dev/null || fail backup-failed "snapshot $id not found after backup"
 
   local verified=false
   if [[ ${VERIFY:-false} == true ]]; then
     log "verifying repository data (${VERIFY_SUBSET:-5%})"
     restic "${RARGS[@]}" check --read-data-subset="${VERIFY_SUBSET:-5%}" >/dev/null \
-      || { discard "$id"; fail "repository check failed"; }
+      || { discard "$id"; fail verify-failed "repository check failed"; }
     verified=true
   fi
 
   # Mark complete. Tagging rewrites the snapshot, so look the final ID up by its unique request tag.
   restic "${RARGS[@]}" tag --remove incomplete --add complete "$id" >/dev/null \
-    || { discard "$id"; fail "could not mark the snapshot complete"; }
+    || { discard "$id"; fail backup-failed "could not mark the snapshot complete"; }
   id=$(restic "${RARGS[@]}" snapshots --json --host "$host" \
         --tag "source=$BACKUP_SOURCE,request=${BACKUP_REQUEST:-manual},complete" | jq -r 'max_by(.time).id // empty')
-  [[ -n $id ]] || fail "completed snapshot not found"
+  [[ -n $id ]] || fail backup-failed "completed snapshot not found"
 
   # Leftovers of failed runs of this source (explicitly tagged "incomplete") are removed.
   restic "${RARGS[@]}" snapshots --json --host "$host" --tag "source=$BACKUP_SOURCE,incomplete" \
@@ -152,11 +162,11 @@ backup() {
     log "applying retention ${policy[*]}"
     local fj=/tmp/forget.json
     restic "${RARGS[@]}" forget --json --group-by host --host "$host" \
-        --tag "source=$BACKUP_SOURCE,complete" "${policy[@]}" > "$fj" || fail "retention (forget) failed"
+        --tag "source=$BACKUP_SOURCE,complete" "${policy[@]}" > "$fj" || fail retention-failed "retention (forget) failed"
     retention=$(jq -c '{kept: ([.[].keep[]?.short_id] | .[:200]), removed: ([.[].remove[]?] | length)}' "$fj")
   fi
   if [[ -s /tmp/incomplete || $(jq -r '.removed // 0' <<< "$retention") -gt 0 ]]; then
-    restic "${RARGS[@]}" prune >/dev/null || fail "retention (prune) failed"
+    restic "${RARGS[@]}" prune >/dev/null || fail retention-failed "retention (prune) failed"
   fi
 
   local result
@@ -184,22 +194,22 @@ restore() {
   local snap=${RESTORE_SNAPSHOT:-latest} id
   if [[ $snap == latest ]]; then
     # The full source identity: namespace (host) and source name, complete snapshots only.
-    [[ -n ${BACKUP_SOURCE:-} && -n ${BACKUP_HOST:-} ]] || fail "restoring latest needs BACKUP_SOURCE and BACKUP_HOST"
+    [[ -n ${BACKUP_SOURCE:-} && -n ${BACKUP_HOST:-} ]] || fail config-missing "restoring latest needs BACKUP_SOURCE and BACKUP_HOST"
     id=$(restic "${RARGS[@]}" snapshots --json --host "$BACKUP_HOST" --tag "source=$BACKUP_SOURCE,complete" \
           | jq -r 'max_by(.time).id // empty')
   else
     id=$(restic "${RARGS[@]}" snapshots --json "$snap" | jq -r '.[0] | select((.tags // []) | index("complete")) | .id // empty')
   fi
-  [[ -n $id ]] || fail "no complete snapshot found for $snap"
+  [[ -n $id ]] || fail snapshot-not-found "no complete snapshot found for $snap"
   local restored=0 sub
   for sub in "${RESTORE_SUBPATH:-/source}" "$OUTPUT_DIR/volume"; do
     if restic "${RARGS[@]}" ls "$id" "$sub" >/dev/null 2>&1 && [[ -n $(restic "${RARGS[@]}" ls --json "$id" "$sub" | jq -r 'select(.path != null) | .path' | head -n1) ]]; then
       log "restoring ${id:0:8}:$sub into $RESTORE_TARGET"
-      restic "${RARGS[@]}" restore "$id:$sub" --target "$RESTORE_TARGET" >/dev/null || fail "restore of $sub failed"
+      restic "${RARGS[@]}" restore "$id:$sub" --target "$RESTORE_TARGET" >/dev/null || fail restore-failed "restore of $sub failed"
       restored=$((restored + 1))
     fi
   done
-  [[ $restored -gt 0 ]] || fail "snapshot ${id:0:8} contains nothing to restore"
+  [[ $restored -gt 0 ]] || fail restore-failed "snapshot ${id:0:8} contains nothing to restore"
   # Plugin copies were written by the worker; give them back their original owner and mode.
   if restic "${RARGS[@]}" dump "$id" "$OUTPUT_DIR/volume.owners" > /tmp/volume.owners 2>/dev/null; then
     local meta rel uid gid mode
@@ -207,7 +217,7 @@ restore() {
       read -r uid gid mode <<< "$meta"
       [[ -n $rel && $rel != *..* && -e $RESTORE_TARGET/$rel ]] || continue
       chown "$uid:$gid" "$RESTORE_TARGET/$rel" && chmod "$mode" "$RESTORE_TARGET/$rel" \
-        || fail "could not restore owner/mode of $rel"
+        || fail restore-failed "could not restore owner/mode of $rel"
     done < /tmp/volume.owners
   fi
   report "$(jq -cn --arg s "$id" '{restored: $s}')"
@@ -216,5 +226,5 @@ restore() {
 case ${1:-backup} in
   backup) backup ;;
   restore) restore ;;
-  *) fail "usage: bo-worker backup|restore" ;;
+  *) fail usage "usage: bo-worker backup|restore" ;;
 esac

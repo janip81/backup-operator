@@ -62,10 +62,27 @@ def plugin_env(req) -> dict:
     return env
 
 
+# Repository URLs never carry credentials (#13): no user:password@ for S3/REST (use the Secret), only a
+# plain user@host for SFTP (key from the Secret), no query strings.
+REPO_URL = re.compile(
+    r"^(?:(?:s3|rest):https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/-]*)?"
+    r"|sftp:[a-z_][a-z0-9_.-]{0,31}@[A-Za-z0-9.-]+:/[A-Za-z0-9._~/-]*)$")
+
+
+def validate_repository(req) -> None:
+    from .engine import AttemptFailed
+    url = (req.spec.get("repository") or {}).get("url") or ""
+    if not REPO_URL.match(url):
+        raise AttemptFailed("InvalidRepository", "Repository URL is not supported or contains credentials; "
+                            "use s3:https://host/bucket/prefix, rest:https://host/path or sftp:user@host:/path "
+                            "and put credentials in the Secret", terminal=True)
+
+
 def ensure_dependencies(req, n: dict, kube) -> None:
     """Validate what the worker will mount from the source namespace. Nothing is copied (#10, #13):
     the credentials Secret and a custom plugin's ConfigMap are owned by the application namespace."""
     from .engine import AttemptFailed
+    validate_repository(req)
     repo = req.spec.get("repository") or {}
     secret = kube.get_secret(req.src_ns, repo.get("credentialsSecret", ""))
     if not secret or "RESTIC_PASSWORD" not in (secret.get("data") or {}):
@@ -94,6 +111,17 @@ def worker_security_context(req) -> dict:
                 "capabilities": {"drop": ["ALL"]}}
     return {**base, "runAsUser": 0, "runAsGroup": 0, "runAsNonRoot": False,
             "capabilities": {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]}}
+
+
+def worker_pod_security_context(req) -> dict:
+    ctx = {"seccompProfile": {"type": "RuntimeDefault"}}
+    worker = req.spec.get("worker") or {}
+    if worker.get("runAsUser") is not None:
+        # The credentials Secret and scratch volumes become group-owned by this gid. The read-only
+        # snapshot clone is not re-owned (kubelet skips ownership changes for read-only mounts).
+        ctx.update({"fsGroup": int(worker.get("runAsGroup", worker["runAsUser"])),
+                    "fsGroupChangePolicy": "OnRootMismatch"})
+    return ctx
 
 
 def worker_job(req, n: dict) -> dict:
@@ -128,7 +156,8 @@ def worker_job(req, n: dict) -> dict:
         {"name": "source", "persistentVolumeClaim": {"claimName": n["pvc"], "readOnly": True}},
         {"name": "output", "emptyDir": {"sizeLimit": cfg.WORKER_OUTPUT_LIMIT}},
         {"name": "tmp", "emptyDir": {"sizeLimit": cfg.WORKER_TMP_LIMIT}},
-        {"name": "creds", "secret": {"secretName": repo["credentialsSecret"], "defaultMode": 0o400}},
+        # 0440 + fsGroup (non-root mode) lets the worker's group read the files; root mode reads them as owner.
+        {"name": "creds", "secret": {"secretName": repo["credentialsSecret"], "defaultMode": 0o440}},
     ]
     if plugin.get("name") == "custom":
         ref = plugin.get("configMapRef") or {}
@@ -140,7 +169,7 @@ def worker_job(req, n: dict) -> dict:
         "restartPolicy": "Never",
         "automountServiceAccountToken": False,  # workers never talk to the Kubernetes API
         "enableServiceLinks": False,
-        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+        "securityContext": worker_pod_security_context(req),
         "containers": [{
             "name": "worker",
             "image": cfg.WORKER_IMAGE,
@@ -180,5 +209,5 @@ def backup_record(req, name: str) -> dict:
         "spec": {"requestRef": {"name": req.name, "namespace": req.namespace, "uid": req.uid},
                  "source": req.source, "sourceNamespace": req.src_ns, "sourcePVC": req.src_pvc,
                  "plugin": _plugin(req).get("name", "files"),
-                 "repository": (req.spec.get("repository") or {}).get("url")},
+                 "repository": (req.spec.get("repository") or {}).get("url")},  # validated: no credentials
     }

@@ -380,7 +380,7 @@ def test_success_is_recorded_before_any_cleanup(kube, adm):
     assert body["status"]["phase"] == "CleaningUp"
     rec = kube.objs["backups"][("app", "r1")]
     assert rec["status"]["phase"] == "Succeeded"
-    assert rec["status"]["artifact"] == {"snapshotId": "abc123", "filesNew": 3}
+    assert rec["status"]["artifact"] == {"snapshotId": "abc12345", "filesNew": 3}
     assert rec["status"]["result"]["exitCode"] == 0
     names = engine.Req.from_body(body).names()
     assert ("app", names["job"]) in kube.objs["job"]  # temporary objects still present when recorded

@@ -19,7 +19,7 @@ class FakeKube:
         self.job_result = "Complete"  # Complete | Failed | None (keeps running)
         self.wffc = False
         self.hooks = {}  # method name -> callable(*args) that may raise
-        self.termination_message = '{"snapshotId": "abc123", "filesNew": 3}'
+        self.termination_message = '{"snapshotId": "abc12345", "filesNew": 3}'
         self.cms = {("app", "my-plugin"): {"data": {"plugin.sh": "echo hi"}}}
         self.secrets = {("app", "creds"): {"data": {"RESTIC_PASSWORD": "cHc="}}}
 

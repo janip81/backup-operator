@@ -67,3 +67,44 @@ def test_failure_messages_name_secrets_but_never_show_values(caplog):
     assert body["status"]["reason"] == "CredentialsNotFound" and "app/creds" in body["status"]["message"]
     assert CANARY not in repr(body["status"]) + caplog.text
     apply(body, None)
+
+
+def test_artifact_is_sanitized():
+    raw = {"snapshotId": "ab" * 32, "shortId": "abababab", "filesNew": 3, "bytesAdded": -1, "totalFiles": True,
+           "plugin": "files", "verified": "yes", "error": "Fatal: open /creds: key=" + CANARY,
+           "retention": {"kept": ["abababab", "not hex!", CANARY], "removed": 1}, "extra": CANARY}
+    out = engine.sanitize_artifact(raw)
+    assert out == {"snapshotId": "ab" * 32, "shortId": "abababab", "filesNew": 3, "plugin": "files",
+                   "retention": {"kept": ["abababab"], "removed": 1}}
+    assert engine.sanitize_artifact({"error": "repository-unavailable"}) == {"error": "repository-unavailable"}
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("s3:https://s3.example.com/backups/app", True),
+    ("s3:https://s3.example.com:9000/b", True),
+    ("rest:https://rest.example/repo", True),
+    ("sftp:backup@nas.example:/srv/restic/app", True),
+    ("s3:https://key:secret@s3.example.com/b", False),
+    ("rest:https://user:" + CANARY + "@rest.example/repo", False),
+    ("sftp:backup:pw@nas.example:/srv", False),
+    ("s3:https://s3.example.com/b?access_key=x", False),
+    ("local:/tmp/repo", False),
+])
+def test_repository_urls_never_carry_credentials(url, ok):
+    req = engine.Req.from_body(make_req(repository={"url": url, "credentialsSecret": "creds"}))
+    if ok:
+        jobspec.validate_repository(req)
+    else:
+        with pytest.raises(engine.AttemptFailed):
+            jobspec.validate_repository(req)
+
+
+def test_non_root_mode_can_read_credentials():
+    req = engine.Req.from_body(make_req(worker={"runAsUser": 1000, "runAsGroup": 2000}))
+    pod = jobspec.worker_job(req, req.names())["spec"]["template"]["spec"]
+    assert pod["securityContext"]["fsGroup"] == 2000
+    creds = next(v for v in pod["volumes"] if v["name"] == "creds")
+    assert creds["secret"]["defaultMode"] == 0o440
