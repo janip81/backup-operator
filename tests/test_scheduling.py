@@ -27,8 +27,15 @@ def apply(body, patch):
             body["status"][k] = v
 
 
+TAG = scheduling.request_name("nightly", "sched-uid-1", datetime(2026, 1, 1, tzinfo=UTC)).split("-")[1]
+
+
+def rn(stamp):
+    return f"nightly-{TAG}-{stamp}"
+
+
 def requests(kube):
-    return sorted(n for (_, n) in kube.objs["backuprequests"])
+    return sorted(n.replace(f"-{TAG}-", "-") for (_, n) in kube.objs["backuprequests"])
 
 
 @pytest.fixture
@@ -41,7 +48,7 @@ def test_no_run_at_creation_then_exactly_one_per_tick(kube):
     for minute in range(0, 16 * 60, 1):  # timer every minute from creation until after the 03:00 tick
         apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=minute)))
     assert requests(kube) == ["nightly-202611170300"]
-    req = kube.objs["backuprequests"][("app", "nightly-202611170300")]
+    req = kube.objs["backuprequests"][("app", rn("202611170300"))]
     assert req["metadata"]["ownerReferences"][0]["uid"] == "sched-uid-1"
     assert req["metadata"]["labels"]["backup.techmonkeys.se/schedule"] == "nightly"
     assert req["spec"]["sourcePVC"] == "data"
@@ -86,11 +93,11 @@ def test_forbid_skips_tick_while_previous_run_active(kube):
     s = schedule(cron="0 * * * *")
     t1 = datetime(2026, 11, 16, 13, 0, tzinfo=UTC)
     apply(s, scheduling.reconcile_schedule(s, kube, t1))
-    kube.objs["backuprequests"][("app", "nightly-202611161300")]["status"] = {"phase": "Running"}
+    kube.objs["backuprequests"][("app", rn("202611161300"))]["status"] = {"phase": "Running"}
     apply(s, scheduling.reconcile_schedule(s, kube, t1 + timedelta(hours=1)))
     assert requests(kube) == ["nightly-202611161300"]
     assert s["status"]["lastSkipped"]["reason"] == "PreviousRunActive"
-    kube.objs["backuprequests"][("app", "nightly-202611161300")]["status"] = {"phase": "Succeeded"}
+    kube.objs["backuprequests"][("app", rn("202611161300"))]["status"] = {"phase": "Succeeded"}
     apply(s, scheduling.reconcile_schedule(s, kube, t1 + timedelta(hours=2)))
     assert requests(kube) == ["nightly-202611161300", "nightly-202611161500"]
     assert "lastSkipped" not in s["status"]
@@ -100,7 +107,7 @@ def test_allow_policy_creates_overlapping_runs(kube):
     s = schedule(cron="0 * * * *", concurrencyPolicy="Allow")
     t1 = datetime(2026, 11, 16, 13, 0, tzinfo=UTC)
     apply(s, scheduling.reconcile_schedule(s, kube, t1))
-    kube.objs["backuprequests"][("app", "nightly-202611161300")]["status"] = {"phase": "Running"}
+    kube.objs["backuprequests"][("app", rn("202611161300"))]["status"] = {"phase": "Running"}
     apply(s, scheduling.reconcile_schedule(s, kube, t1 + timedelta(hours=1)))
     assert len(requests(kube)) == 2  # the engine still serializes runs per source PVC
 
@@ -118,7 +125,7 @@ def test_history_limits_keep_newest_and_never_touch_active(kube):
     phases = ["Succeeded", "Failed", "Succeeded", "Failed", "Succeeded"]
     for i, phase in enumerate(phases):
         apply(s, scheduling.reconcile_schedule(s, kube, t + timedelta(hours=i)))
-        name = scheduling.request_name("nightly", t + timedelta(hours=i))
+        name = scheduling.request_name("nightly", "sched-uid-1", t + timedelta(hours=i))
         kube.objs["backuprequests"][("app", name)]["status"] = {"phase": phase}
     apply(s, scheduling.reconcile_schedule(s, kube, t + timedelta(hours=5)))  # 18:00, still running
     # newest 2 succeeded (15:00, 17:00), newest 1 failed (16:00), and the new active run
@@ -129,8 +136,8 @@ def test_history_limits_keep_newest_and_never_touch_active(kube):
 def test_foreign_request_with_the_tick_name_is_not_adopted(kube):
     s = schedule(cron="0 * * * *")
     t1 = datetime(2026, 11, 16, 13, 0, tzinfo=UTC)
-    kube.objs["backuprequests"][("app", "nightly-202611161300")] = {"metadata": {"name": "nightly-202611161300",
-                                                                                 "labels": {}}}
+    kube.objs["backuprequests"][("app", rn("202611161300"))] = {"metadata": {"name": rn("202611161300"),
+                                                                              "labels": {}}}
     with pytest.raises(TransientApiError):
         scheduling.reconcile_schedule(s, kube, t1)
 
@@ -142,8 +149,39 @@ def test_timezone_is_respected(kube):
 
 
 def test_long_names_stay_valid():
-    name = scheduling.request_name("x" * 80, datetime(2026, 11, 17, 3, 0, tzinfo=UTC))
+    name = scheduling.request_name("x" * 80, "u", datetime(2026, 11, 17, 3, 0, tzinfo=UTC))
     assert len(name) <= 63 and name.endswith("202611170300")
+
+
+@pytest.mark.parametrize("limit", [0, 1])
+def test_completion_between_lost_status_writes_never_duplicates(kube, limit):
+    s = schedule(cron="0 * * * *", successfulHistoryLimit=limit, failedHistoryLimit=limit)
+    t1 = datetime(2026, 11, 16, 13, 0, tzinfo=UTC)
+    for i in range(6):  # status write lost every time; the run completes in between
+        scheduling.reconcile_schedule(s, kube, t1 + timedelta(seconds=20 * i))
+        kube.objs["backuprequests"][("app", rn("202611161300"))]["status"] = {"phase": "Succeeded"}
+    assert requests(kube) == ["nightly-202611161300"]
+    assert len(kube.created["backuprequests"]) == 1
+
+
+def test_recreated_schedule_gets_its_own_request_names(kube):
+    old = schedule(cron="0 * * * *")
+    t1 = datetime(2026, 11, 16, 13, 0, tzinfo=UTC)
+    scheduling.reconcile_schedule(old, kube, t1)
+    new = schedule(cron="0 * * * *")
+    new["metadata"]["uid"] = "sched-uid-2"
+    patch = scheduling.reconcile_schedule(new, kube, t1 + timedelta(seconds=30))
+    assert len(kube.objs["backuprequests"]) == 2 and patch["lastRequest"] != rn("202611161300")
+
+
+def test_never_runs_before_the_tick(kube):
+    s = schedule(cron="0 * * * *")
+    just_before = datetime(2026, 11, 16, 12, 59, 59, 500000, tzinfo=UTC)
+    assert scheduling.latest_tick(s["spec"], just_before) == datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+    exact = datetime(2026, 11, 16, 13, 0, tzinfo=UTC)
+    assert scheduling.latest_tick(s["spec"], exact) == exact
+    apply(s, scheduling.reconcile_schedule(s, kube, just_before))
+    assert requests(kube) == []
 
 
 def test_interval_metric(kube):

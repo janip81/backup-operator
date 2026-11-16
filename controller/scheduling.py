@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -31,10 +31,12 @@ def _tz(spec: dict):
 
 
 def latest_tick(spec: dict, now: datetime) -> datetime:
-    """The most recent tick at or before now (UTC)."""
+    """The most recent tick at or before now (UTC); never a tick in the future."""
     local = now.astimezone(_tz(spec))
-    it = croniter(spec["schedule"], local + timedelta(seconds=1))
-    return it.get_prev(datetime).astimezone(UTC)
+    prev = croniter(spec["schedule"], local).get_prev(datetime)
+    following = croniter(spec["schedule"], prev).get_next(datetime)
+    tick = following if following <= local else prev  # include a tick exactly at now
+    return tick.astimezone(UTC)
 
 
 def next_tick(spec: dict, after: datetime) -> datetime:
@@ -47,13 +49,12 @@ def interval_seconds(spec: dict, now: datetime) -> float:
     return (next_tick(spec, a) - a).total_seconds()
 
 
-def request_name(schedule: str, tick: datetime) -> str:
+def request_name(schedule: str, uid: str, tick: datetime) -> str:
+    """Identity = schedule UID + tick. A recreated schedule with the same name gets different names."""
     stamp = tick.strftime("%Y%m%d%H%M")
-    base = f"{schedule}-{stamp}"
-    if len(base) <= 63:
-        return base
-    digest = hashlib.sha256(schedule.encode()).hexdigest()[:6]
-    return f"{schedule[:63 - len(stamp) - 8]}-{digest}-{stamp}"
+    tag = hashlib.sha256(uid.encode()).hexdigest()[:6]
+    prefix = schedule[:63 - len(stamp) - len(tag) - 2].rstrip("-.")
+    return f"{prefix}-{tag}-{stamp}"
 
 
 def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
@@ -83,7 +84,7 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
         return {**patch, "lastSkipped": {"time": ts(tick), "reason": "MissedDeadline"},
                 "message": f"Skipped {ts(tick)}: more than {deadline}s late (operator down?)"}
 
-    req_name = request_name(name, tick)
+    req_name = request_name(name, uid, tick)
     owned = kube.list_crs_ns("backuprequests", ns, f"{SCHEDULE_UID_LABEL}={uid}")
     if (spec.get("concurrencyPolicy") or "Forbid") == "Forbid":
         active = [r["metadata"]["name"] for r in owned
@@ -96,7 +97,7 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
     existing = kube.get_cr("backuprequests", ns, req_name)
     if ((existing or {}).get("metadata") or {}).get("labels", {}).get(SCHEDULE_UID_LABEL) != uid:
         raise TransientApiError(f"BackupRequest {req_name} exists but does not belong to this schedule")
-    _prune_history(kube, ns, spec, owned + [existing])
+    _prune_history(kube, ns, spec, owned, keep_name=req_name)
     return {**patch, "lastRequest": req_name, "message": f"Created {req_name} for {ts(tick)}", "lastSkipped": None}
 
 
@@ -122,12 +123,14 @@ def _request(schedule: dict, name: str, tick: datetime) -> dict:
     }
 
 
-def _prune_history(kube, ns: str, spec: dict, owned: list[dict]) -> None:
-    """Keep the newest N succeeded and M failed requests of this schedule; never touch active ones.
-    Deleting a request runs its finalizer, which removes any temporary objects it still has."""
+def _prune_history(kube, ns: str, spec: dict, owned: list[dict], keep_name: str) -> None:
+    """Keep the newest N succeeded and M failed requests of this schedule; never touch active ones,
+    and never the request of the tick being decided (it is this tick's idempotency marker until
+    lastScheduleTime is persisted). Deleting a request runs its cleanup finalizer."""
     limits = {"Succeeded": int(spec.get("successfulHistoryLimit", 3)), "Failed": int(spec.get("failedHistoryLimit", 3))}
+    unique = {r["metadata"]["name"]: r for r in owned if r["metadata"]["name"] != keep_name}
     for phase, keep in limits.items():
-        done = [r for r in owned if (r.get("status") or {}).get("phase") == phase]
+        done = [r for r in unique.values() if (r.get("status") or {}).get("phase") == phase]
         done.sort(key=lambda r: r["metadata"].get("annotations", {}).get(SCHEDULED_TIME, ""), reverse=True)
         for r in done[keep:]:
             kube.delete_cr("backuprequests", ns, r["metadata"]["name"], r["metadata"].get("uid"))
