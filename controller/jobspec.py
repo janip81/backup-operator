@@ -82,6 +82,20 @@ def ensure_dependencies(req, n: dict, kube) -> None:
     plugin_env(req)  # validates config keys
 
 
+def worker_security_context(req) -> dict:
+    """Default: root with every capability dropped except DAC_READ_SEARCH (read any file on the snapshot
+    clone, write nothing outside its scratch volumes). With spec.worker.runAsUser the worker runs as that
+    non-root user with no capabilities at all (Pod Security "restricted"), for volumes readable by it."""
+    base = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "privileged": False}
+    worker = req.spec.get("worker") or {}
+    if worker.get("runAsUser") is not None:
+        return {**base, "runAsNonRoot": True, "runAsUser": int(worker["runAsUser"]),
+                "runAsGroup": int(worker.get("runAsGroup", worker["runAsUser"])),
+                "capabilities": {"drop": ["ALL"]}}
+    return {**base, "runAsUser": 0, "runAsGroup": 0, "runAsNonRoot": False,
+            "capabilities": {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]}}
+
+
 def worker_job(req, n: dict) -> dict:
     labels = req.labels()
     plugin = _plugin(req)
@@ -137,13 +151,7 @@ def worker_job(req, n: dict) -> dict:
             "env": [{"name": k, "value": v} for k, v in env.items()],
             "volumeMounts": mounts,
             "resources": cfg.WORKER_RESOURCES,
-            # Root is needed to read every file on the snapshot clone; all capabilities are dropped except
-            # DAC_READ_SEARCH (read any file), and the root filesystem is read-only.
-            "securityContext": {
-                "runAsUser": 0, "runAsGroup": 0, "runAsNonRoot": False,
-                "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "privileged": False,
-                "capabilities": {"drop": ["ALL"], "add": ["DAC_READ_SEARCH"]},
-            },
+            "securityContext": worker_security_context(req),
         }],
         "volumes": volumes,
     }

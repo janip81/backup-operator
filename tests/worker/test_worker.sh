@@ -121,6 +121,14 @@ worker "$src" PLUGIN=files -- backup >/dev/null 2>&1 || { msg; die "backup after
 count=$(docker run --rm --user 0 -v "$repo:/repo" -v "$tmp/creds:/c:ro" --entrypoint restic "$IMG" \
   -r /repo --password-file /c/RESTIC_PASSWORD snapshots --json --tag manual-by-admin | jq length)
 [[ $count == 1 ]] || die "a foreign snapshot was removed"
+# an abandoned run (tagged incomplete, e.g. the pod was killed) is cleaned up by the next successful run
+docker run --rm --user 0 -v "$src:/data:ro" -v "$repo:/repo" -v "$tmp/creds:/c:ro" --entrypoint restic "$IMG" \
+  -r /repo --password-file /c/RESTIC_PASSWORD backup --host app --tag source=test --tag incomplete /data >/dev/null 2>&1 || true
+worker "$src" PLUGIN=files -- backup >/dev/null 2>&1 || { msg; die "backup after abandoned run"; }
+left=$(docker run --rm --user 0 -v "$repo:/repo" -v "$tmp/creds:/c:ro" --entrypoint restic "$IMG" \
+  -r /repo --password-file /c/RESTIC_PASSWORD snapshots --json --tag incomplete | jq length)
+[[ $left == 0 ]] || die "abandoned incomplete snapshot was not cleaned up"
+ok "abandoned incomplete snapshots are cleaned up by the next successful run"
 chmod 0600 "$src/private.txt"; h3=$(host_hashes "$src"); chmod 0000 "$src/private.txt"
 ok "snapshots made outside the operator are never removed"
 

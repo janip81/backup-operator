@@ -412,8 +412,10 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
         metrics.observe_result(req.src_ns, req.source, phase, completed.timestamp())
         if phase == "Succeeded":
             _sync_records_with_retention(req, kube, name, stored)
-        return {"phase": "CleaningUp", "phaseStartedAt": ts(now),
-                "message": f"{phase} recorded as Backup {name}; removing temporary resources"}
+        patch = {"phase": "CleaningUp", "phaseStartedAt": ts(now)}
+        if phase == "Succeeded":  # a failure keeps its own message (the diagnosis) on the request
+            patch["message"] = f"Recorded as Backup {name}; removing temporary resources"
+        return patch
 
     result = _job_result(req, kube)
     started = parse_ts(req.status.get("startedAt"))
@@ -452,6 +454,10 @@ def _sync_records_with_retention(req: Req, kube, current: str, stored: dict) -> 
             kube.delete_cr("backups", req.namespace, rec["metadata"]["name"], rec["metadata"].get("uid"))
 
 
+ARTIFACT_FIELDS = ("plugin", "snapshotId", "shortId", "filesNew", "filesChanged", "filesUnmodified", "bytesAdded",
+                   "totalFiles", "totalBytes", "verified", "retention", "error")
+
+
 def _job_result(req: Req, kube) -> dict:
     """Exit details and the worker's JSON summary (termination message, never logs) from the job pod."""
     pods = kube.list_job_pods(req.src_ns, req.names()["job"]) if req.status.get("resources") else []
@@ -467,7 +473,8 @@ def _job_result(req: Req, kube) -> dict:
             except ValueError:
                 parsed = None
             if isinstance(parsed, dict):
-                out["artifact"] = parsed
+                # Only known fields of the worker summary are stored; nothing else from the pod is kept.
+                out["artifact"] = {k: v for k, v in parsed.items() if k in ARTIFACT_FIELDS}
             return out
     return {}
 

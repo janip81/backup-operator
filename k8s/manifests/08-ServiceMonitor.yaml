@@ -18,8 +18,7 @@ kind: ServiceMonitor
 metadata:
   name: backup-operator
   namespace: backup-operator
-  labels:
-    release: prod-mgmt-prometheus
+  # Add the labels your Prometheus selects ServiceMonitors by (serviceMonitorSelector).
 spec:
   selector:
     matchLabels:

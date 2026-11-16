@@ -163,6 +163,18 @@ spec:
                     type: boolean
                     default: false
                     description: Read back a sample (5%) of repository data after each backup.
+                  worker:
+                    type: object
+                    description: 'Worker identity. Default: root with only DAC_READ_SEARCH (reads any file; needs Pod Security
+                      ''privileged'' in the source namespace). Set runAsUser to run non-root without capabilities (''restricted'')
+                      when that user can read the volume.'
+                    properties:
+                      runAsUser:
+                        type: integer
+                        minimum: 1
+                      runAsGroup:
+                        type: integer
+                        minimum: 0
                 description: BackupRequest spec used for every run.
           status:
             type: object

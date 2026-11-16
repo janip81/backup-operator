@@ -13,7 +13,12 @@ def bootstrap_admission(**_):
     ensure_bootstrapped()
 
 
-@kopf.timer(cfg.GROUP, cfg.VERSION, "backuprequests", interval=cfg.RECONCILE_INTERVAL, sharp=False)
+# Only v0.4 objects (spec.repository present) are handled. v0.3 objects can't even be patched under the
+# v0.4 schema (no finalizer can be added or removed), so they are left alone; see the upgrade notes.
+V04 = {"field": "spec.repository", "value": kopf.PRESENT}
+
+
+@kopf.timer(cfg.GROUP, cfg.VERSION, "backuprequests", interval=cfg.RECONCILE_INTERVAL, sharp=False, **V04)
 def reconcile_request(body, patch, logger, **_):
     ensure_bootstrapped()
     status_patch = engine.reconcile(dict(body), kube(), ADMISSION, datetime.now(UTC))
@@ -27,7 +32,7 @@ def reconcile_request(body, patch, logger, **_):
 CLEANUP_GIVE_UP = 3600  # seconds
 
 
-@kopf.on.delete(cfg.GROUP, cfg.VERSION, "backuprequests", backoff=15)
+@kopf.on.delete(cfg.GROUP, cfg.VERSION, "backuprequests", backoff=15, **V04)
 def cleanup_on_delete(body, logger, runtime, **_):
     """Finalizer: a deleted request removes every temporary object any of its attempts created and
     waits until they are gone. After CLEANUP_GIVE_UP seconds it stops waiting explicitly (so the

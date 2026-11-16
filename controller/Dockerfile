@@ -16,4 +16,5 @@ COPY controller controller
 RUN useradd -u 10001 -M -s /usr/sbin/nologin appuser
 USER 10001
 
-ENTRYPOINT ["kopf", "run", "-m", "controller", "--all-namespaces"]
+# --standalone: a single instance, no peering (admission control is in-process; deploy with Recreate).
+ENTRYPOINT ["kopf", "run", "-m", "controller", "--all-namespaces", "--standalone", "--liveness=http://0.0.0.0:8081/healthz"]
