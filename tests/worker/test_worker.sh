@@ -106,6 +106,7 @@ ok "restore of latest matches"
 chmod 0600 "$src/private.txt"; echo "changed" >> "$src/private.txt"; chmod 0000 "$src/private.txt"  # must be re-read
 chmod 0644 "$tmp/creds/RESTIC_PASSWORD"   # without the capability, only the 0000 source file is unreadable
 NO_READ_CAP=1 worker "$src" PLUGIN=files -- backup >/dev/null 2>&1 && die "partial backup accepted"
+NO_READ_CAP=1 worker "$src" PLUGIN=files ALLOW_PARTIAL=true -- backup >/dev/null 2>&1 && die "partial accepted via ALLOW_PARTIAL"
 chmod 0600 "$tmp/creds/RESTIC_PASSWORD"
 [[ $(msg | jq -r .error) == *"incomplete"* ]] || die "partial error: $(msg)"
 reset_restore
@@ -113,12 +114,22 @@ worker "$src" RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "
 [[ $(restored_hashes) == "$h2" ]] || die "latest after a partial backup is not the last complete snapshot"
 ok "partial backup fails and is never selected as latest"
 
+# snapshots not made by this worker (no incomplete/complete tags) are never removed
+docker run --rm --user 0 -v "$src:/data:ro" -v "$repo:/repo" -v "$tmp/creds:/c:ro" --entrypoint restic "$IMG" \
+  -r /repo --password-file /c/RESTIC_PASSWORD backup --host app --tag source=test --tag manual-by-admin /data >/dev/null
+worker "$src" PLUGIN=files -- backup >/dev/null 2>&1 || { msg; die "backup after manual snapshot"; }
+count=$(docker run --rm --user 0 -v "$repo:/repo" -v "$tmp/creds:/c:ro" --entrypoint restic "$IMG" \
+  -r /repo --password-file /c/RESTIC_PASSWORD snapshots --json --tag manual-by-admin | jq length)
+[[ $count == 1 ]] || die "a foreign snapshot was removed"
+chmod 0600 "$src/private.txt"; h3=$(host_hashes "$src"); chmod 0000 "$src/private.txt"
+ok "snapshots made outside the operator are never removed"
+
 # same source name in another namespace (host) in the same repository: restores stay separate
 other=$tmp/other; mkdir -p "$other"; echo "other namespace" > "$other/x.txt"
 worker "$other" BACKUP_HOST=ns2 -- backup >/dev/null 2>&1 || { msg; die "ns2 backup"; }
 reset_restore
 worker "$src" RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore app"; }
-[[ $(restored_hashes) == "$h2" ]] || die "restore of latest picked another namespace's data"
+[[ $(restored_hashes) == "$h3" ]] || die "restore of latest picked another namespace's data"
 reset_restore
 worker "$src" BACKUP_HOST=ns2 RESTORE_TARGET=/restore -- restore >/dev/null 2>&1 || { msg; die "restore ns2"; }
 [[ $(restored_hashes) == "$(host_hashes "$other")" ]] || die "restore of ns2 differs"

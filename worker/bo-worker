@@ -96,20 +96,23 @@ backup() {
     if [[ -f $OUTPUT_DIR/.backup-excludes ]]; then cat "$OUTPUT_DIR/.backup-excludes"; fi
   } > "$excludes"
 
-  # Snapshots are created without the "complete" tag; only a snapshot that was stored fully (and
-  # verified, if requested) gets it. Restore "latest" and retention only ever select complete snapshots.
+  # Every run starts as an explicitly "incomplete" snapshot; only a snapshot that was stored fully (and
+  # verified, if requested) is retagged "complete". Restore "latest" and retention select only complete
+  # snapshots, and cleanup only ever removes snapshots carrying the "incomplete" marker, so snapshots made
+  # by anything else are never touched.
   local host=${BACKUP_HOST:-backup-operator}
   log "storing snapshot"
   local out=/tmp/backup.json rc=0
   restic "${RARGS[@]}" backup --json --host "$host" \
-      --tag "source=$BACKUP_SOURCE" --tag "request=${BACKUP_REQUEST:-manual}" \
+      --tag "source=$BACKUP_SOURCE" --tag "request=${BACKUP_REQUEST:-manual}" --tag incomplete \
       --files-from-verbatim "$list" --exclude-file "$excludes" > "$out" || rc=$?
   local summary id=""
   summary=$(jq -c 'select(.message_type == "summary")' "$out" 2>/dev/null | tail -n1 || true)
   [[ -n $summary ]] && id=$(jq -r '.snapshot_id // empty' <<< "$summary")
-  if [[ $rc -eq 3 && ${ALLOW_PARTIAL:-false} != true ]]; then
+  # A partial snapshot (exit 3: some files unreadable) is never accepted.
+  if [[ $rc -eq 3 ]]; then
     discard "$id"; fail "some files could not be read; snapshot is incomplete (exit 3)"
-  elif [[ $rc -ne 0 && $rc -ne 3 ]]; then
+  elif [[ $rc -ne 0 ]]; then
     discard "$id"; fail "restic backup failed (exit $rc)"
   fi
   [[ -n $id ]] || fail "restic produced no summary"
@@ -124,14 +127,15 @@ backup() {
   fi
 
   # Mark complete. Tagging rewrites the snapshot, so look the final ID up by its unique request tag.
-  restic "${RARGS[@]}" tag --add complete "$id" >/dev/null || { discard "$id"; fail "could not mark the snapshot complete"; }
+  restic "${RARGS[@]}" tag --remove incomplete --add complete "$id" >/dev/null \
+    || { discard "$id"; fail "could not mark the snapshot complete"; }
   id=$(restic "${RARGS[@]}" snapshots --json --host "$host" \
         --tag "source=$BACKUP_SOURCE,request=${BACKUP_REQUEST:-manual},complete" | jq -r 'max_by(.time).id // empty')
   [[ -n $id ]] || fail "completed snapshot not found"
 
-  # Leftovers of failed runs for this source (no "complete" tag) are removed; they were never restorable.
-  restic "${RARGS[@]}" snapshots --json --host "$host" --tag "source=$BACKUP_SOURCE" \
-    | jq -r '.[] | select((.tags // []) | index("complete") | not) | .id' > /tmp/incomplete || true
+  # Leftovers of failed runs of this source (explicitly tagged "incomplete") are removed.
+  restic "${RARGS[@]}" snapshots --json --host "$host" --tag "source=$BACKUP_SOURCE,incomplete" \
+    | jq -r '.[] | .id' > /tmp/incomplete || true
   if [[ -s /tmp/incomplete ]]; then
     log "removing $(wc -l < /tmp/incomplete) incomplete snapshot(s)"
     xargs -r restic "${RARGS[@]}" forget < /tmp/incomplete >/dev/null || log "could not remove incomplete snapshots"
