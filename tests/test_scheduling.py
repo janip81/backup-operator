@@ -42,7 +42,9 @@ def requests(kube):
 
 @pytest.fixture
 def kube():
-    return FakeKube()
+    k = FakeKube()
+    k.add_source_pvc("app", "data")
+    return k
 
 
 def test_no_run_at_creation_then_exactly_one_per_tick(kube):
@@ -191,3 +193,41 @@ def test_interval_metric(kube):
     s = schedule(cron="0 */6 * * *")
     scheduling.reconcile_schedule(s, kube, CREATED)
     assert metrics.SCHEDULE_INTERVAL.labels(namespace="app", source="nightly")._value.get() == 6 * 3600
+
+
+def test_validation_flags_broken_setup_and_skips_ticks(kube):
+    s = schedule(cron="0 * * * *")
+    s["spec"]["template"]["sourcePVC"] = "missing"
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=1)))
+    cond = s["status"]["conditions"][0]
+    assert cond["status"] == "False" and cond["reason"] == "SourcePVCNotFound"
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(hours=1, minutes=1)))
+    assert requests(kube) == [] and s["status"]["lastSkipped"]["reason"] == "SourcePVCNotFound"
+    from controller import metrics
+    assert metrics.SCHEDULE_READY.labels(namespace="app", source="nightly")._value.get() == 0
+    kube.add_source_pvc("app", "missing")  # fixed: the next tick runs and Ready flips
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(hours=2, minutes=1)))
+    assert len(requests(kube)) == 1 and s["status"]["conditions"][0]["status"] == "True"
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda t: t["repository"].update(url="s3:https://k:s@h/b"), "InvalidRepository"),
+    (lambda t: t["repository"].update(credentialsSecret="nope"), "CredentialsNotFound"),
+    (lambda t: t.update(plugin={"name": "custom", "configMapRef": {"name": "nope"}}), "PluginNotFound"),
+])
+def test_validation_reasons(kube, change, reason):
+    s = schedule()
+    change(s["spec"]["template"])
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=1)))
+    assert s["status"]["conditions"][0]["reason"] == reason
+
+
+def test_spec_change_revalidates_once(kube):
+    s = schedule()
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=1)))
+    calls = kube.calls
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=2)))
+    assert kube.calls == calls  # unchanged generation: no validation calls
+    s["metadata"]["generation"] = 2
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=3)))
+    assert kube.calls > calls and s["status"]["observedGeneration"] == 2

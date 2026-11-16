@@ -207,12 +207,37 @@ spec:
                     type: string
               message:
                 type: string
+              observedGeneration:
+                type: integer
+              conditions:
+                type: array
+                description: 'Ready: whether the source volume, credentials and repository settings are valid.'
+                items:
+                  type: object
+                  required:
+                  - type
+                  - status
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
     subresources:
       status: {}
     additionalPrinterColumns:
     - name: Schedule
       type: string
       jsonPath: .spec.schedule
+    - name: Ready
+      type: string
+      jsonPath: .status.conditions[?(@.type=="Ready")].status
     - name: Phase
       type: string
       jsonPath: .status.phase

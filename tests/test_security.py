@@ -45,7 +45,7 @@ def test_non_root_worker_mode_has_no_capabilities():
 
 
 def test_operator_rbac_is_least_privilege():
-    docs = list(yaml.safe_load_all(open("k8s/manifests/02-rbac.yaml")))
+    docs = list(yaml.safe_load_all(open("k8s/base/rbac.yaml")))
     rules = next(d for d in docs if d["kind"] == "ClusterRole")["rules"]
     by_resource = {}
     for r in rules:

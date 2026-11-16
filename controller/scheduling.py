@@ -57,13 +57,63 @@ def request_name(schedule: str, uid: str, tick: datetime) -> str:
     return f"{prefix}-{tag}-{stamp}"
 
 
+def validate(spec: dict, ns: str, kube) -> tuple[bool, str, str]:
+    """Check what a run needs before creating it (#15): valid repository URL, an existing Bound source PVC,
+    the credentials Secret (with RESTIC_PASSWORD) and, for custom plugins, the script ConfigMap."""
+    from .jobspec import REPO_URL
+    t = spec.get("template") or {}
+    src_ns = t.get("sourceNamespace") or ns
+    repo = t.get("repository") or {}
+    if not REPO_URL.match(repo.get("url") or ""):
+        return False, "InvalidRepository", "Repository URL is not supported or contains credentials"
+    pvc = kube.get_pvc(src_ns, t.get("sourcePVC") or "")
+    if not pvc:
+        return False, "SourcePVCNotFound", f"Source PVC {src_ns}/{t.get('sourcePVC')} not found"
+    if (pvc.get("status") or {}).get("phase") != "Bound":
+        return False, "SourcePVCNotBound", f"Source PVC {src_ns}/{t.get('sourcePVC')} is not Bound"
+    secret = kube.get_secret(src_ns, repo.get("credentialsSecret") or "")
+    if not secret or "RESTIC_PASSWORD" not in (secret.get("data") or {}):
+        return False, "CredentialsNotFound", f"Secret {src_ns}/{repo.get('credentialsSecret')} with RESTIC_PASSWORD not found"
+    plugin = t.get("plugin") or {}
+    if plugin.get("name") == "custom":
+        ref = plugin.get("configMapRef") or {}
+        cm = kube.get_configmap(src_ns, ref.get("name") or "")
+        if not cm or ref.get("key", "plugin.sh") not in (cm.get("data") or {}):
+            return False, "PluginNotFound", f"ConfigMap {src_ns}/{ref.get('name')} with the plugin script not found"
+    return True, "Valid", "Source volume, credentials and repository settings are valid"
+
+
+def _ready_patch(status: dict, ok: bool, reason: str, message: str, now: datetime, generation) -> dict:
+    current = next((c for c in status.get("conditions") or [] if c.get("type") == "Ready"), {})
+    value = "True" if ok else "False"
+    cond = {"type": "Ready", "status": value, "reason": reason, "message": message,
+            "lastTransitionTime": current.get("lastTransitionTime") if current.get("status") == value else ts(now)}
+    patch = {}
+    if {k: current.get(k) for k in cond} != cond:
+        patch["conditions"] = [cond]
+    if status.get("observedGeneration") != generation:
+        patch["observedGeneration"] = generation
+    return patch
+
+
 def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
     md, spec = body["metadata"], body.get("spec") or {}
     status = dict(body.get("status") or {})
     name, ns, uid = md["name"], md["namespace"], md["uid"]
-    metrics.SCHEDULE_INTERVAL.labels(namespace=_src_ns(spec, ns), source=name).set(interval_seconds(spec, now))
+    src_ns = _src_ns(spec, ns)
+    metrics.SCHEDULE_INTERVAL.labels(namespace=src_ns, source=name).set(interval_seconds(spec, now))
+    generation = md.get("generation", 1)
+    ready_cond = next((c for c in status.get("conditions") or [] if c.get("type") == "Ready"), None)
 
     patch: dict = {}
+    if status.get("observedGeneration") != generation or ready_cond is None:
+        # New or changed schedule: validate once now (between ticks nothing else touches the API).
+        ok, reason, message = validate(spec, ns, kube)
+        patch.update(_ready_patch(status, ok, reason, message, now, generation))
+        metrics.SCHEDULE_READY.labels(namespace=src_ns, source=name).set(1 if ok else 0)
+    elif ready_cond:
+        metrics.SCHEDULE_READY.labels(namespace=src_ns, source=name).set(1 if ready_cond["status"] == "True" else 0)
+
     phase = "Suspended" if spec.get("suspend") else "Active"
     if status.get("phase") != phase:
         patch["phase"] = phase
@@ -93,8 +143,18 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
             return {**patch, "lastSkipped": {"time": ts(tick), "reason": "PreviousRunActive"},
                     "message": f"Skipped {ts(tick)}: previous run still active ({', '.join(active)})"}
 
-    kube.create_cr("backuprequests", ns, _request(body, req_name, tick))
     existing = kube.get_cr("backuprequests", ns, req_name)
+    if existing is None:
+        # Re-check right before the run: a broken setup skips the tick visibly instead of creating a run
+        # that can only fail. (An already created request for this tick is kept: idempotency first.)
+        ok, reason, message = validate(spec, ns, kube)
+        patch.update(_ready_patch({**status, **patch}, ok, reason, message, now, generation))
+        metrics.SCHEDULE_READY.labels(namespace=src_ns, source=name).set(1 if ok else 0)
+        if not ok:
+            return {**patch, "lastSkipped": {"time": ts(tick), "reason": reason},
+                    "message": f"Skipped {ts(tick)}: {message}"}
+        kube.create_cr("backuprequests", ns, _request(body, req_name, tick))
+        existing = kube.get_cr("backuprequests", ns, req_name)
     if ((existing or {}).get("metadata") or {}).get("labels", {}).get(SCHEDULE_UID_LABEL) != uid:
         raise TransientApiError(f"BackupRequest {req_name} exists but does not belong to this schedule")
     _prune_history(kube, ns, spec, owned, keep_name=req_name)

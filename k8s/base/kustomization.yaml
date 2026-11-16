@@ -1,0 +1,16 @@
+# GitOps-ready install (#15): kubectl apply -k k8s/base, or point an Argo CD Application at this path
+# (or reference it remotely: github.com/janip81/backup-operator//k8s/base?ref=v0.4.0).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - crds/backuprequests.backup.techmonkeys.se.yaml
+  - crds/backups.backup.techmonkeys.se.yaml
+  - crds/backupschedules.backup.techmonkeys.se.yaml
+  - namespace.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+# Pin both images to the same immutable release (or a digest). Override in an overlay to upgrade.
+images:
+  - name: ghcr.io/janip81/backup-operator-controller
+    newTag: 0.4.0

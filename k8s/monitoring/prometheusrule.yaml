@@ -50,6 +50,14 @@ spec:
             summary: "Latest backup run failed for {{ $labels.namespace }}/{{ $labels.source }}"
             description: Check the newest Backup record and the BackupRequest status for the reason.
 
+        - alert: BackupScheduleNotReady
+          expr: backup_operator_schedule_ready == 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "Schedule {{ $labels.namespace }}/{{ $labels.source }} is not ready"
+            description: Its source volume, credentials or repository settings are invalid, so its runs are skipped. See the schedule's Ready condition.
+
         - alert: BackupSnapshotsAccumulating
           expr: backup_operator_owned_snapshots > 2
           for: 30m

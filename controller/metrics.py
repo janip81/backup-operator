@@ -24,6 +24,10 @@ CLEANUP_STUCK = Gauge("backup_operator_cleanup_stuck_requests", "Requests whose 
 SCHEDULE_INTERVAL = Gauge("backup_operator_schedule_interval_seconds",
                           "Nominal interval of each BackupSchedule (for staleness alerts).", ["namespace", "source"])
 
+SCHEDULE_READY = Gauge("backup_operator_schedule_ready",
+                       "1 when the schedule's source volume, credentials and repository settings are valid.",
+                       ["namespace", "source"])
+
 _lock = threading.Lock()
 _latest: dict[tuple[str, str, str], float] = {}
 _snapshots: dict[str, set[str]] = {}

@@ -62,6 +62,8 @@ fix: handle missing PVC gracefully
 
 ```bash
 make check        # ruff + pytest in a python:3.13 container (same as CI)
+make worker-test  # worker image integration tests
+make rules-test   # alert rule tests
 make build        # local images tagged :local
 ```
 `make push` only accepts throwaway tags (`local*`, `dev-*`, `test-*`). Release tags are built by CI from committed code.

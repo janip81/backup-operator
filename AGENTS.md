@@ -11,47 +11,37 @@ Images: `ghcr.io/janip81/backup-operator-{controller,worker}`.
 
 ## Current status
 
-- **The operator is paused and not production-ready.** Don't run it against a live cluster or create
-  BackupRequests there without the owner's explicit approval.
-- Known problems are tracked as GitHub issues, and **all** of them must be resolved before it is re-enabled:
-  - #8 (P0): bound retries and API load
-  - #9: idempotent schedules
-  - #10: cleanup ownership
-  - #11: honest outcomes and alerts
-  - #12: retention and versioned recovery points
-  - #13: credential handling
-  - #14: build pipeline and image provenance
-  - #15: GitOps deployment and schedule configuration
-- Don't build or push the CI-owned image tags by hand (see #14).
+- v0.4 (issues #8–#15) is a rework that is not released yet. The owner's cluster still runs nothing
+  from it. Don't deploy it anywhere or create BackupRequests in a live cluster without the owner's
+  explicit approval.
+- Upgrade path from v0.3: docs/upgrade-0.4.md. Operating and restore checks: docs/operations.md.
 
 ## Repository layout
 
 ```
-controller/                  kopf operator
-  __main__.py                entrypoint; imports the handlers, starts metrics on :8080
-  config.py                  env configuration (WORKER_IMAGE, SERVICE_ACCOUNT, ...)
-  metrics.py                 Prometheus counters/histograms
-  handlers/backup_request.py BackupRequest pipeline (most logic)
-  handlers/backup_schedule.py BackupSchedule timer -> creates BackupRequests
-  utils/kubectl.py           subprocess kubectl wrapper: run(), cleanup()
-  utils/waiters.py           polling waits for snapshot / PVC / job
-  utils/rbac.py              per-namespace RBAC, secret/configmap copies
-  utils/status.py            status patch helpers, common labels
-  requirements.txt           controller runtime dependencies (the only list used by images)
-requirements-dev.txt         lint/test tools for `make check` and CI
-tests/                       pytest suite
-worker/                      transfer container (rsync/scp/sftp scripts)
-k8s/manifests/               namespace, RBAC, deployment, CRDs, script presets, examples
-.github/workflows/           image build workflow (see #14 for known gaps)
+controller/                 kopf operator
+  engine.py                 BackupRequest state machine (admission, phases, recording, cleanup)
+  scheduling.py             BackupSchedule ticks, validation, history
+  jobspec.py                snapshot / temporary PVC / worker Job builders, repository URL rules
+  kube.py                   Kubernetes API wrapper: timeouts, rate limit, normalized errors
+  metrics.py                Prometheus metrics
+  handlers/                 kopf wiring (timers, delete finalizer, metric events)
+worker/                     restic worker image: bo-worker (backup/restore) and plugins/
+k8s/base/                   kustomize base: CRDs, namespace, RBAC, Deployment, Service
+k8s/monitoring/             ServiceMonitor and PrometheusRule (optional)
+examples/                   schedules per plugin, credentials, one-off backup, restore Job
+docs/                       upgrade notes and operations
+tests/                      pytest (fake API), worker integration tests, promtool rule tests
+hack/                       helper scripts (rule tests)
 ```
 
 ## CRDs (`backup.techmonkeys.se/v1`)
 
 | Kind | Purpose |
 |------|---------|
-| `BackupSchedule` | 60 s timer; creates a `BackupRequest` when its cron expression is due. `retention` is **not implemented** (#12). |
-| `BackupRequest` | One run: VolumeSnapshot → PVC clone → worker Job → cleanup → `Backup` record, then the request is deleted. |
-| `Backup` | Record of a finished run. A worker failure can still be recorded misleadingly (#11). |
+| `BackupSchedule` | Cron (+ time zone) → one BackupRequest per tick from `spec.template`; Ready condition |
+| `BackupRequest` | One run: snapshot → temporary PVC → worker Job → Backup record → cleanup. Spec is immutable. |
+| `Backup` | Result of a finished run (restic snapshot ID, sizes, reason). Removed when retention prunes its snapshot. |
 
 ## Hard-won lessons (do not regress)
 
@@ -84,6 +74,8 @@ k8s/manifests/               namespace, RBAC, deployment, CRDs, script presets, 
 
 ```bash
 make check                                           # ruff + pytest in a container, same as CI
+make worker-test                                     # worker integration tests (docker)
+make rules-test                                      # alert rule tests (promtool)
 make build                                           # local images tagged :local
 make run-operator                                    # against a disposable cluster only
 ```

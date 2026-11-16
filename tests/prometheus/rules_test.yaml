@@ -75,3 +75,22 @@ tests:
             exp_annotations:
               summary: Backup operator metrics are missing
               description: The operator isn't running or isn't scraped, so no backups are being taken or tracked.
+
+  - name: schedule not ready
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x60'
+      - series: 'backup_operator_schedule_ready{namespace="app",source="nightly"}'
+        values: '1x10 0x50'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupScheduleNotReady
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BackupScheduleNotReady
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "Schedule app/nightly is not ready"
+              description: Its source volume, credentials or repository settings are invalid, so its runs are skipped. See the schedule's Ready condition.
