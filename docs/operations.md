@@ -20,7 +20,8 @@
 
 1. Restore the exact snapshot of the supervised run into a **new** PVC with `examples/restore-job.yaml`:
    set `RESTORE_SNAPSHOT` to `status.artifact.shortId` from its Backup record. (For `latest`, set
-   `BACKUP_SOURCE` to the source shown in the record, `status.source`, and `BACKUP_HOST` to the namespace.)
+   `BACKUP_SOURCE` to the source shown in the record, `status.source`, and `BACKUP_HOST` to the source
+   namespace, `spec.sourceNamespace`.)
 2. Mount the restored PVC in a throwaway pod and compare with the live data, e.g. file counts and
    checksums of a few important files; for `sqlite`, open the database and run `PRAGMA integrity_check`.
 3. Delete the throwaway pod, Job and PVC.
