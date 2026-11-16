@@ -15,7 +15,7 @@ data:
     PVC_NAME="${PVC_NAME:-valheim-server-backups}"
     SNAPSHOT_CLASS="${SNAPSHOT_CLASS:-vsphere-csi-snapclass}"
     STORAGE_CLASS="${STORAGE_CLASS:-vsphere-csi}"
-    REMOTE_PATH="${REMOTE_PATH:-backup@starbase:/mnt/storage/backups/valheim}"
+    REMOTE_PATH="${REMOTE_PATH:-backup@nas.example:/backups/valheim}"
     TEMP_NAMESPACE="${TEMP_NAMESPACE:-backup}"
     SNAP_NAME="${PVC_NAME}-snap-$(date +%Y%m%d-%H%M%S)"
     TMP_PVC="${PVC_NAME}-restore"

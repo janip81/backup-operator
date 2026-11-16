@@ -8,6 +8,10 @@
 A lightweight Kubernetes operator written in Python using **Kopf** for handling snapshot-based backups of PVCs.  
 Designed to work seamlessly across namespaces and clusters.
 
+> **Status (2026-11):** paused for a reliability rework. Known problems with retries, cleanup, schedules,
+> retention and the build pipeline are tracked in [issues #8–#15](https://github.com/janip81/backup-operator/issues).
+> Don't use this in production until all of #8–#15 are resolved.
+
 ---
 
 ## 🚀 Overview
@@ -30,7 +34,7 @@ It was designed primarily for Home Assistant, Zigbee2MQTT, and other workloads r
 - ✅ Supports **vSphere-CSI**, Longhorn, and other CSI drivers
 - ✅ Handles **WaitForFirstConsumer** binding (auto pod trigger)
 - ✅ Automatic **ServiceAccount + RBAC creation** per namespace
-- ✅ Graceful error handling if resources are deleted mid-backup
+- ⚠️ Error handling and retries are being reworked (#8, #11)
 - ✅ **Prometheus metrics** exposed on `:8080/metrics`
 - ✅ Minimal dependencies — only Python + Kopf + Kubernetes client
 
@@ -64,7 +68,7 @@ spec:
   sourcePVC: home-assistant-home-assistant
   snapshotClass: vsphere-csi-snapclass
   storageClass: vsphere-csi
-  remotePath: backup@starbase.threshold.se:/s3/test-backup/hass/
+  remotePath: backup@nas.example:/backups/home-assistant/
   customScript:
     preset: rsync-snapshot-default-backup-script
     key: backup.sh
@@ -103,12 +107,17 @@ spec:
 
 ## 🧰 Cleanup Behavior
 
-After successful or failed backups, temporary resources are removed automatically:
+> ⚠️ Cleanup is only reliable on the normal success path. When an unexpected error occurs (for example a
+> snapshot timeout or an API error), the handler records the failure and re-raises it **without cleaning up**,
+> and the retry starts again with new resource names. Temporary objects can therefore be left behind.
+> Being fixed in #8 and #10.
 
-- ✅ Snapshots deleted after job completion
-- ✅ Temporary PVCs and jobs removed
-- ✅ Copied secrets and ConfigMaps cleaned up
-- ✅ Status updated on BackupRequest CR
+On the normal path, the handler removes:
+
+- Snapshots after the job completes
+- Temporary PVCs and jobs
+- Copied secrets and ConfigMaps (these are shared per namespace; see #10)
+- and records the status on the BackupRequest CR
 
 Example logs:
 
@@ -128,19 +137,25 @@ Run locally (for debug):
 kopf run --standalone controller/__main__.py --verbose
 ```
 
-Deploy to cluster:
+Deploy to a **disposable test cluster** in stages. Don't run `kubectl apply -f k8s/manifests/` on the whole
+directory: it also applies the example BackupRequests (`06-`, `07-`), which start backups immediately.
 
 ```bash
-kubectl apply -f manifests/crds/
-kubectl apply -f manifests/
+kubectl apply -f k8s/manifests/crds/
+kubectl apply -f k8s/manifests/00-namespace.yaml -f k8s/manifests/02-rbac.yaml \
+              -f k8s/manifests/03-configmap-scripts.yaml
+# create the image pull and SSH secrets yourself (see 01-ghcr-secret.sample.yaml)
+kubectl apply -f k8s/manifests/04-deployment.yaml      # starts the controller (replicas: 1)
+kubectl apply -f k8s/manifests/08-ServiceMonitor.yaml  # optional, needs Prometheus Operator
 ```
+
+Only create BackupRequests or BackupSchedules once the destination and the source PVC are verified.
 
 ---
 
 ## 🧪 Version
 
-**v0.2.0** — stable release  
-Includes:
+**v0.3.0** — see [CHANGELOG.md](CHANGELOG.md). v0.2.0 included:
 - Automatic handling of WaitForFirstConsumer PVCs
 - Non-root SSH key fix
 - Graceful error handling for deleted PVCs/snapshots/jobs
@@ -156,7 +171,7 @@ Planned improvements for the next release:
 - [ ] 🧩 **Incremental backups** — track and upload only changed files between runs  
 - [ ] ♻️ **Automatic restore workflow** — ability to restore PVCs directly via `BackupRequest` CR  
 - [ ] 🔒 **Enhanced security** — restricted service account roles and scoped RBAC per namespace  
-- [ ] 💾 **Configurable retention policy** — define how many snapshots or backups to keep  
+- [ ] 💾 **Configurable retention policy** — `BackupSchedule.retention` is accepted but **not implemented yet** (#12)  
 - [ ] 📦 **Custom storage support** — add native support for MinIO, S3, or NFS targets  
 - [ ] 📊 **Expanded Prometheus metrics** — job durations, errors, and per-namespace stats  
 - [ ] ⚙️ **Operator configuration via ConfigMap** — allow dynamic runtime configuration without rebuilding the image  
@@ -168,7 +183,7 @@ Planned improvements for the next release:
 ---
 
 💡 *Want to contribute?*  
-Check out the [CONTRIBUTING.md](CONTRIBUTING.md) (coming soon) and open a feature branch with your proposal.
+Check out [CONTRIBUTING.md](CONTRIBUTING.md) and open a feature branch with your proposal. Coding agents: see [AGENTS.md](AGENTS.md).
 
 
 © 2025 Jani Pesonen — TechMonkeys

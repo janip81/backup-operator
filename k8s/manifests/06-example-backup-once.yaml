@@ -9,4 +9,4 @@ spec:
   snapshotClass: vsphere-csi-snapclass
   backupNamespace: backup
   runInSourceNamespace: true 
-  remotePath: "user@starbase:/mnt/backups/home-assistant"
+  remotePath: "user@nas.example:/backups/home-assistant"
