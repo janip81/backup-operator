@@ -1,5 +1,8 @@
-import time, json
+import json
+import time
+
 from .kubectl import run
+
 
 def wait_for_snapshot(ns, name, timeout=600):
     print(f"[INFO] Waiting for snapshot {ns}/{name}...")

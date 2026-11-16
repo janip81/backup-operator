@@ -37,13 +37,13 @@ controller/                  kopf operator
   utils/waiters.py           polling waits for snapshot / PVC / job
   utils/rbac.py              per-namespace RBAC, secret/configmap copies
   utils/status.py            status patch helpers, common labels
-  requirements.txt           dependencies actually installed in the controller image
+  requirements.txt           controller runtime dependencies (the only list used by images)
+requirements-dev.txt         lint/test tools for `make check` and CI
+tests/                       pytest suite
 worker/                      transfer container (rsync/scp/sftp scripts)
 k8s/manifests/               namespace, RBAC, deployment, CRDs, script presets, examples
 .github/workflows/           image build workflow (see #14 for known gaps)
 ```
-
-`requirements.txt` in the repository root is a stale local venv freeze. The images don't use it.
 
 ## CRDs (`backup.techmonkeys.se/v1`)
 
@@ -83,10 +83,9 @@ k8s/manifests/               namespace, RBAC, deployment, CRDs, script presets, 
 ## Local development
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r controller/requirements.txt
-kopf run -m controller --all-namespaces --verbose   # against a disposable cluster only
-make build TAG=local                                 # local images; do not push CI tags
+make check                                           # ruff + pytest in a container, same as CI
+make build                                           # local images tagged :local
+make run-operator                                    # against a disposable cluster only
 ```
 
 ## Troubleshooting (read-only first)

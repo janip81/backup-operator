@@ -6,28 +6,27 @@ from datetime import datetime
 import kopf
 import yaml
 
-print("[DEBUG] importing", __name__)
-
 from ..config import (
-    WORKER_IMAGE,
-    SERVICE_ACCOUNT,
-    IMAGE_PULL_SECRET,
     DEFAULT_STORAGE,
+    IMAGE_PULL_SECRET,
     MOUNT_PATH,
     OPERATOR_NAMESPACE,
+    SERVICE_ACCOUNT,
+    WORKER_IMAGE,
 )
 from ..metrics import (
-    backup_total,
-    backup_failures,
     backup_duration,
-    backup_job_total,
+    backup_failures,
     backup_job_duration,
+    backup_job_total,
+    backup_total,
 )
-from ..utils.kubectl import run, cleanup
-from ..utils.waiters import wait_for_snapshot, wait_for_pvc_bound, wait_for_job
-from ..utils.rbac import ensure_rbac, copy_secret, copy_configmap
-from ..utils.status import update_status, labels_yaml
-from ..utils.misc import rand_suffix, get_pvc_size, get_job_logs
+from ..utils.kubectl import cleanup, run
+from ..utils.misc import get_job_logs, get_pvc_size, rand_suffix
+from ..utils.rbac import copy_configmap, copy_secret, ensure_rbac
+from ..utils.status import labels_yaml, update_status
+from ..utils.waiters import wait_for_job, wait_for_pvc_bound, wait_for_snapshot
+
 
 @kopf.on.create("backup.techmonkeys.se", "v1", "backuprequests")
 @kopf.on.resume("backup.techmonkeys.se", "v1", "backuprequests")

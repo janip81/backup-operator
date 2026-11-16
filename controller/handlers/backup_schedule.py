@@ -1,10 +1,8 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import kopf
 import croniter
-
-print("[DEBUG] importing", __name__)
+import kopf
 
 from ..config import DEFAULT_STORAGE
 from ..utils.kubectl import run
@@ -26,10 +24,10 @@ def handle_schedule(spec, status, name, namespace, **_):
     remote_path = spec.get("remotePath")
     method = spec.get("transferMethod", "rsync")
     custom_script = spec.get("customScript", {"preset": "rsync-snapshot-default-backup-script"})
-    retention = spec.get("retention", 7)  # currently unused, reserved for future
+    _retention = spec.get("retention", 7)  # not implemented yet (#12)
 
     # Timestamps
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     last_run_str = status.get("lastRunTime") if status else None
     last_run = datetime.fromisoformat(last_run_str.replace("Z", "+00:00")) if last_run_str else None
 

@@ -1,8 +1,11 @@
 from datetime import datetime
+
 import yaml
+
+from ..config import SERVICE_ACCOUNT
 from .kubectl import run
 from .status import labels_yaml
-from ..config import SERVICE_ACCOUNT, IMAGE_PULL_SECRET
+
 
 def ensure_rbac(ns, job, req, ts=None):
     ts = ts or datetime.utcnow().strftime("%Y%m%d-%H%M%S")

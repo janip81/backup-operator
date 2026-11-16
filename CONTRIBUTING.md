@@ -31,8 +31,9 @@ When finished:
 
 ## 🧪 Testing Workflows
 
-- GitHub Actions builds and pushes images on pushes to `main` and `develop` and on `v*.*.*` tags. Branch pushes that change only ignored paths (docs, manifests/YAML, `.github/**`, …; see `paths-ignore` in the workflow) don't trigger a build.
-- PRs are **not** built yet, and the workflow has no manual trigger (tracked in #14). Build locally before opening a PR.
+- **PRs to `main`:** lint (`ruff`), tests (`pytest`) and both image builds run. Nothing is pushed.
+- **Pushes to `main`/`develop`:** the same checks run, then images are pushed with the branch name and `sha-<commit>` tags. Pushes that change only Markdown or `docs/**` are skipped.
+- **Version tags `vX.Y.Z`:** images are pushed as `X.Y.Z`, `X.Y` and `latest`.
 
 ---
 
@@ -58,11 +59,11 @@ fix: handle missing PVC gracefully
 
 ## 🧪 Testing Locally
 
-If you want to build locally before committing:
 ```bash
-make build
+make check        # ruff + pytest in a python:3.13 container (same as CI)
+make build        # local images tagged :local
 ```
-Don't push by hand to the tags CI manages (`develop`, `latest`, `v*`); see #14.
+`make push` only accepts throwaway tags (`local*`, `dev-*`, `test-*`). Release tags are built by CI from committed code.
 
 ---
 
@@ -74,7 +75,7 @@ Don't push by hand to the tags CI manages (`develop`, `latest`, `v*`); see #14.
    git tag -a v0.3.0 -m "Release v0.3.0"
    git push origin v0.3.0
    ```
-3. GitHub Actions builds and pushes the `vX.Y.Z` images (`latest` is published from `main` pushes and from version tags)
+3. GitHub Actions builds and pushes `X.Y.Z`, `X.Y` and `latest`
 
 ---
 

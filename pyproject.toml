@@ -1,0 +1,11 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = ["00ignored", "at-home"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = ["E501"]  # long log lines are fine; no formatter enforced
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

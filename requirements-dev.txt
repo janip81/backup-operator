@@ -1,0 +1,4 @@
+# Local development and CI checks (not installed in images).
+-r controller/requirements.txt
+pytest==9.2.0
+ruff==0.17.5

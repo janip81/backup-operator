@@ -134,7 +134,8 @@ Example logs:
 Run locally (for debug):
 
 ```bash
-kopf run --standalone controller/__main__.py --verbose
+make check          # lint + tests
+make run-operator   # runs kopf against the current kube context (disposable cluster only)
 ```
 
 Deploy to a **disposable test cluster** in stages. Don't run `kubectl apply -f k8s/manifests/` on the whole

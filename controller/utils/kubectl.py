@@ -1,4 +1,6 @@
-import subprocess, sys, json
+import subprocess
+import sys
+
 
 def run(cmd, input=None, capture=True, check=True, ignore_not_found=False):
     """Run kubectl and return stdout; handle 'NotFound' gracefully when requested."""

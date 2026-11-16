@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
+
 from .kubectl import run
+
 
 def update_status(namespace, name, phase, message=None, extra=None):
     now = datetime.utcnow().isoformat() + "Z"
