@@ -14,9 +14,6 @@ venv/
 ENV/
 env/
 
-# Virtual environment requirements
-requirements.txt
-
 # Editors
 .vscode/
 .idea/
@@ -38,7 +35,7 @@ Thumbs.db
 *.pid
 
 # K8s / Helm
-charts/.tgz
+charts/*.tgz
 manifests/tmp/
 
 # Local cluster configs
@@ -52,3 +49,42 @@ manifests/tmp/
 at-home/**
 
 RELEASE_GUIDE.md
+
+# Local/private data and review evidence
+/private/
+/temp/
+/tmp/
+
+# Environment files (keep sanitized examples trackable)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Private keys and credential files
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.kdbx
+credentials.json
+service-account*.json
+
+# Local kubeconfigs
+kubeconfig
+kubeconfig.*
+*-kubeconfig
+
+# Database dumps and backup archives
+*.sql
+*.sql.gz
+*.sql.bz2
+*.dump
+*.backup
+*.tar.gz
+*.tgz
