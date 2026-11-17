@@ -61,12 +61,15 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           filters: |
+            # Both builds use the repository root as context: .dockerignore affects both images.
             controller:
               - 'controller/**'
+              - '.dockerignore'
               - '.github/workflows/build-release.yaml'
             worker:
               - 'worker/**'
               - 'tests/worker/**'
+              - '.dockerignore'
               - '.github/workflows/build-release.yaml'
       - name: Pick images
         id: pick
