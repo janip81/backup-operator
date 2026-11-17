@@ -34,6 +34,9 @@ Reliability and security rework (issues #8–#15) and a new storage model: resti
 - Dashboard: cluster selector (`k8s_cluster`) on every query, schedules table, whole-number counts,
   operator memory no longer doubled
 
+- The temporary PVC defaults to the source PVC's StorageClass (clusters without a default class
+  left it Pending until the clone timeout); a schedule naming a missing StorageClass is not Ready
+
 #### Removed
 - rsync/scp transfer, script presets, per-namespace RBAC and secret copying
 

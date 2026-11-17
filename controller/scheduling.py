@@ -59,7 +59,7 @@ def request_name(schedule: str, uid: str, tick: datetime) -> str:
 
 def validate(spec: dict, ns: str, kube) -> tuple[bool, str, str]:
     """Check what a run needs before creating it (#15): valid repository URL, an existing Bound source PVC,
-    the credentials Secret (with RESTIC_PASSWORD) and, for custom plugins, the script ConfigMap."""
+    a StorageClass for the temporary PVC that exists (when one is named), the credentials Secret (with RESTIC_PASSWORD) and, for custom plugins, the script ConfigMap."""
     from .jobspec import repository_problem
     t = spec.get("template") or {}
     src_ns = t.get("sourceNamespace") or ns
@@ -72,6 +72,10 @@ def validate(spec: dict, ns: str, kube) -> tuple[bool, str, str]:
         return False, "SourcePVCNotFound", f"Source PVC {src_ns}/{t.get('sourcePVC')} not found"
     if (pvc.get("status") or {}).get("phase") != "Bound":
         return False, "SourcePVCNotBound", f"Source PVC {src_ns}/{t.get('sourcePVC')} is not Bound"
+    from .jobspec import clone_storage_class
+    sc_name = clone_storage_class(t, pvc)
+    if sc_name and not kube.get_storage_class(sc_name):
+        return False, "StorageClassNotFound", f"StorageClass {sc_name} for the temporary PVC not found"
     secret = kube.get_secret(src_ns, repo.get("credentialsSecret") or "")
     if not secret:
         return False, "CredentialsNotFound", f"Secret {src_ns}/{repo.get('credentialsSecret')} not found"
