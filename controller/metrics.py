@@ -62,6 +62,7 @@ TERMINAL_PHASES = {"Succeeded", "Failed", "Legacy"}
 
 _lock = threading.RLock()  # re-entrant: resync applies many events while holding it
 _latest: dict[tuple[str, str, str], float] = {}
+_records: dict[str, tuple[str, str, str, float]] = {}  # "ns/name" -> (ns, source, phase, completed)
 _stuck: set[str] = set()
 # Incremental inventories: O(1) work per watch event, so replaying thousands of objects stays cheap.
 _snaps: dict[tuple[str, str], dict] = {}            # (ns, name) -> {pvc, owned, created, deleting}
@@ -93,6 +94,52 @@ def observe_result(namespace: str, source: str, phase: str, completed_ts: float)
         if completed_ts > _latest.get(key, 0):
             _latest[key] = completed_ts
             gauge.labels(namespace=namespace, source=source).set(completed_ts)
+
+
+def record_event(record: str, namespace: str, source: str, phase: str, completed_ts: float | None) -> None:
+    """Track each Backup record (completed_ts None = deleted). Deleting records lowers or removes the
+    source's last success/failure, so sources whose history was deleted disappear from the metrics."""
+    with _lock:
+        old = _records.pop(record, None)
+        if completed_ts is not None and phase in ("Succeeded", "Failed"):
+            _records[record] = (namespace, source, phase, completed_ts)
+        if old and old[:3] != (namespace, source, phase) or (old and completed_ts is None):
+            _recompute_latest(*old[:3])
+    if completed_ts is not None:
+        observe_result(namespace, source, phase, completed_ts)
+
+
+def _recompute_latest(namespace: str, source: str, phase: str) -> None:
+    gauge = LAST_SUCCESS if phase == "Succeeded" else LAST_FAILURE
+    newest = max((r[3] for r in _records.values() if r[:3] == (namespace, source, phase)), default=None)
+    if newest is None:
+        _latest.pop((namespace, source, phase), None)
+        _set_or_remove(gauge, {"namespace": namespace, "source": source}, None)
+    else:
+        _latest[(namespace, source, phase)] = newest
+        gauge.labels(namespace=namespace, source=source).set(newest)
+
+
+# Fixed failure reasons (engine and jobspec). Counters start at 0 for every source the operator sees, so
+# the first failure is a visible increase instead of a series that appears already at 1.
+FAILURE_REASONS = ("ApiErrors", "ApiRejected", "CloneError", "CloneTimeout", "CredentialsNotFound",
+                   "InsecureRepository", "InvalidPluginConfig", "InvalidRepository", "JobFailed",
+                   "JobTimeout", "NameConflict", "PluginNotFound", "SnapshotError", "SnapshotLimit",
+                   "SnapshotTimeout", "SourceNotBound", "SourceNotFound")
+_initialised: set[tuple[str, str, str | None]] = set()
+
+
+def init_source(namespace: str, source: str, pvc: str | None = None) -> None:
+    with _lock:
+        if (namespace, source, pvc) in _initialised:
+            return
+        _initialised.add((namespace, source, pvc))
+    for result in ("succeeded", "failed"):
+        RUNS.labels(namespace=namespace, source=source, result=result)
+    for reason in FAILURE_REASONS:
+        ATTEMPT_FAILURES.labels(namespace=namespace, source=source, reason=reason)
+    if pvc:
+        SNAPSHOTS_CREATED.labels(namespace=namespace, pvc=pvc)
 
 
 def _set_or_remove(gauge, labels: dict, value: float | None) -> None:

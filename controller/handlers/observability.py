@@ -23,18 +23,29 @@ def _epoch(value: str | None) -> float | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+def record_fields(body: dict) -> dict | None:
+    """v0.4 records only (they reference their request); v0.3 records are history from another storage
+    format and are not counted."""
+    spec = body.get("spec") or {}
+    if not (spec.get("requestRef") or {}).get("uid"):
+        return None
+    status = body.get("status") or {}
+    md = body["metadata"]
+    return {"record": f"{md['namespace']}/{md['name']}",
+            "namespace": spec.get("sourceNamespace") or md["namespace"],
+            "source": status.get("source") or spec.get("source") or md["name"],
+            "phase": status.get("phase") or "",
+            "completed_ts": _epoch(status.get("completedAt"))}
+
+
 @kopf.on.event(cfg.GROUP, cfg.VERSION, "backups")
 def backup_event(event, body, **_):
+    f = record_fields(body)
+    if f is None:
+        return
     if event.get("type") == "DELETED":
-        return
-    status = body.get("status") or {}
-    completed = _epoch(status.get("completedAt"))
-    if completed is None:
-        return
-    source = status.get("source") or (body.get("spec") or {}).get("source") \
-        or (body.get("spec") or {}).get("targetNamespace") or body["metadata"]["name"]
-    ns = (body.get("spec") or {}).get("sourceNamespace") or body["metadata"]["namespace"]
-    metrics.observe_result(ns, source, status.get("phase") or "", completed)
+        f["completed_ts"] = None
+    metrics.record_event(**f)
 
 
 def snapshot_fields(body: dict) -> dict:
@@ -80,6 +91,12 @@ def snapshot_content_event(event, body, **_):
 def request_event(event, body, **_):
     f = request_fields(body)
     metrics.request_event(f["key"], None if event.get("type") == "DELETED" else f["phase"], f["created"])
+    spec = body.get("spec") or {}
+    if f["phase"] != "Legacy" and event.get("type") != "DELETED":
+        labels = body["metadata"].get("labels") or {}
+        src_ns = spec.get("sourceNamespace") or body["metadata"]["namespace"]
+        metrics.init_source(src_ns, labels.get(f"{cfg.GROUP}/schedule") or spec.get("sourcePVC", ""),
+                            spec.get("sourcePVC"))
 
 
 def resync_inventory(kube, now: float) -> None:

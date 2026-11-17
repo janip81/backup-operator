@@ -28,6 +28,12 @@ Reliability and security rework (issues #8–#15) and a new storage model: resti
 - Least-privilege RBAC, hardened pods, no credentials outside the Secret (#13)
 - CI validates PRs, tests the worker image, publishes immutable tags (#14)
 
+#### Fixed (after first deployment)
+- Metrics count only v0.4 Backup records, and deleting records lowers or removes a source's last
+  success/failure; counters start at 0 for known sources so the first failure shows as an increase
+- Dashboard: cluster selector (`k8s_cluster`) on every query, schedules table, whole-number counts,
+  operator memory no longer doubled
+
 #### Removed
 - rsync/scp transfer, script presets, per-namespace RBAC and secret copying
 
