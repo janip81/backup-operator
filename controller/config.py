@@ -7,6 +7,9 @@ def _int(name: str, default: int) -> int:
 
 
 GROUP = "backup.techmonkeys.se"
+# Own finalizer name instead of kopf's shared default: kopf removes "its" finalizer from every watched
+# object no handler needs it for, which would touch v0.3 requests and objects of other kopf operators.
+FINALIZER = f"{GROUP}/cleanup"
 VERSION = "v1"
 
 WORKER_IMAGE = os.getenv("WORKER_IMAGE", "ghcr.io/janip81/backup-operator-worker:0.4.0")
@@ -41,3 +44,6 @@ CLEANUP_TIMEOUT = _int("CLEANUP_TIMEOUT_SECONDS", 900)
 # --- Schedules (#9) ---
 SCHEDULE_TIMER_INTERVAL = float(os.getenv("SCHEDULE_TIMER_INTERVAL_SECONDS", "30"))
 SCHEDULE_STARTING_DEADLINE = _int("SCHEDULE_STARTING_DEADLINE_SECONDS", 3600)  # default when the schedule sets none
+
+# Full relist of the metric inventories (fixes deletes missed while a watch was reconnecting).
+INVENTORY_RESYNC = _int("INVENTORY_RESYNC_SECONDS", 600)

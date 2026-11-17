@@ -6,6 +6,8 @@ import logging
 import kopf
 from prometheus_client import start_http_server
 
+from controller import config as cfg
+
 for module in (
     "controller.handlers.backup_request",
     "controller.handlers.backup_schedule",
@@ -22,6 +24,7 @@ def startup(settings: kopf.OperatorSettings, logger, **_):
     settings.watching.server_timeout = 300
     settings.watching.client_timeout = 330
     settings.posting.level = logging.WARNING
+    settings.persistence.finalizer = cfg.FINALIZER
     # kopf logs every successful timer run at INFO; the reconciler logs what matters itself.
     logging.getLogger("kopf.objects").setLevel(logging.WARNING)
     try:

@@ -52,6 +52,11 @@ API_CALLS = Counter("backup_operator_api_calls_total", "Kubernetes API calls mad
 API_ERRORS = Counter("backup_operator_api_errors_total", "Failed Kubernetes API calls by HTTP status (or 'network').",
                      ["code"])
 
+INVENTORY_SYNCED = Gauge("backup_operator_inventory_synced_timestamp_seconds",
+                         "Last full relist of the snapshot, content and request inventories.")
+INVENTORY_FIRST_SYNC = Gauge("backup_operator_inventory_first_sync_timestamp_seconds",
+                             "First complete inventory since this process started (growth alerts wait for it).")
+
 ORPHAN_GRACE_SECONDS = 900
 TERMINAL_PHASES = {"Succeeded", "Failed", "Legacy"}
 
@@ -90,7 +95,18 @@ def _set_or_remove(gauge, labels: dict, value: float | None) -> None:
 
 
 def _group(ns: str, pvc: str) -> dict:
-    return _snap_groups.setdefault((ns, pvc), {"size": 0, "owned": 0, "created": [], "deleting": []})
+    return _snap_groups.setdefault((ns, pvc), {"names": set(), "owned": 0, "created": [], "deleting": []})
+
+
+def _compact(ns: str, pvc: str, g: dict) -> None:
+    """Rebuild a group's heaps once stale entries outnumber live ones (bounded memory, amortised O(1))."""
+    if len(g["created"]) + len(g["deleting"]) <= 2 * len(g["names"]) + 32:
+        return
+    live = [(n, _snaps[(ns, n)]) for n in g["names"]]
+    g["created"] = [(i["created"], n) for n, i in live if i["owned"]]
+    g["deleting"] = [(i["deleting"], n) for n, i in live if i["deleting"]]
+    heapq.heapify(g["created"])
+    heapq.heapify(g["deleting"])
 
 
 def _heap_min(ns: str, pvc: str, heap: list, field: str) -> float | None:
@@ -110,9 +126,8 @@ def _refresh_snapshot_group(ns: str, pvc: str) -> None:
     OWNED_SNAPSHOTS.labels(**labels).set(g["owned"])
     _set_or_remove(OWNED_SNAPSHOT_OLDEST, labels, _heap_min(ns, pvc, g["created"], "created"))
     _set_or_remove(SNAPSHOT_DELETING_SINCE, labels, _heap_min(ns, pvc, g["deleting"], "deleting"))
-    if g["size"] == 0:
-        g["created"].clear()
-        g["deleting"].clear()
+    if not g["names"]:
+        _snap_groups.pop((ns, pvc), None)
 
 
 def snapshot_event(namespace: str, name: str, pvc: str, owned: bool, created: float,
@@ -124,19 +139,20 @@ def snapshot_event(namespace: str, name: str, pvc: str, owned: bool, created: fl
         old = _snaps.pop(key, None)
         if old:
             g = _group(namespace, old["pvc"])
-            g["size"] -= 1
+            g["names"].discard(name)
             g["owned"] -= old["owned"]
             _ns_counts[namespace] -= 1
         if new:
             _snaps[key] = new
             g = _group(namespace, pvc)
-            g["size"] += 1
+            g["names"].add(name)
             g["owned"] += owned
             _ns_counts[namespace] = _ns_counts.get(namespace, 0) + 1
             if owned and (old is None or old != new):
                 heapq.heappush(g["created"], (created, name))
             if deleting and (old is None or old.get("deleting") != deleting or old["pvc"] != pvc):
                 heapq.heappush(g["deleting"], (deleting, name))
+            _compact(namespace, pvc, g)
         ALL_SNAPSHOTS.labels(namespace=namespace).set(_ns_counts.get(namespace, 0))
         if old and (new is None or old["pvc"] != pvc):
             _refresh_snapshot_group(namespace, old["pvc"])
@@ -194,6 +210,30 @@ def install_scrape_time_gauges(clock) -> None:
     """Values derived from the inventories are computed when Prometheus scrapes."""
     ORPHAN_CONTENTS.set_function(lambda: orphan_contents(clock()))
     OLDEST_UNFINISHED.set_function(oldest_unfinished)
+
+
+def resync(snapshots: list[dict], contents: list[dict], requests: list[dict], now: float) -> None:
+    """Replace the inventories with a full list: removes entries whose DELETED event was missed.
+    Each item is the keyword arguments of the matching *_event function (without exists)."""
+    with _lock:
+        snap_gone = set(_snaps) - {(i["namespace"], i["name"]) for i in snapshots}
+        content_gone = set(_contents) - {i["name"] for i in contents}
+        req_gone = set(_requests) - {i["key"] for i in requests}
+    for ns, name in snap_gone:
+        snapshot_event(ns, name, pvc="", owned=False, created=0.0, deleting=None, exists=False)
+    for i in snapshots:
+        snapshot_event(**i, exists=True)
+    for name in content_gone:
+        content_event(name, "", 0.0, exists=False)
+    for i in contents:
+        content_event(**i, exists=True)
+    for key in req_gone:
+        request_event(key, None)
+    for i in requests:
+        request_event(**i)
+    INVENTORY_SYNCED.set(now)
+    if not INVENTORY_FIRST_SYNC._value.get():
+        INVENTORY_FIRST_SYNC.set(now)
 
 
 install_scrape_time_gauges(time.time)

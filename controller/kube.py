@@ -184,6 +184,20 @@ class Kube:
         self._call(self.custom.delete_namespaced_custom_object, cfg.GROUP, cfg.VERSION, ns, plural, name,
                    ok_status=(404, 409), **self._opts(uid))
 
+    def list_all(self, group: str, version: str, plural: str, page: int = 500) -> list[dict]:
+        """Cluster-wide list in pages, so a pile-up of thousands of objects isn't one huge response."""
+        items: list[dict] = []
+        token = None
+        while True:
+            kw = {"limit": page}
+            if token:
+                kw["_continue"] = token
+            res = self._call(self.custom.list_cluster_custom_object, group, version, plural, **kw) or {}
+            items += res.get("items", [])
+            token = (res.get("metadata") or {}).get("continue")
+            if not token:
+                return items
+
     def list_crs(self, plural: str) -> list[dict]:
         res = self._call(self.custom.list_cluster_custom_object, cfg.GROUP, cfg.VERSION, plural)
         return (res or {}).get("items", [])

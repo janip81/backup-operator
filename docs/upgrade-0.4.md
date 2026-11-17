@@ -18,11 +18,13 @@ under the v0.4 schema, so remove them **before** installing the v0.4 CRDs.
 
 ## Steps
 
-1. **Stop the old operator** (if it still runs): `kubectl -n backup-operator scale deploy/backup-operator --replicas=0`.
-2. **Check for leftovers** from failed v0.3 runs and remove them normally (never by removing finalizers):
+1. **Note your schedules** (`kubectl get backupschedules -A -o yaml`), then delete the v0.3 objects
+   **while the old operator still runs**: v0.3 requests carry its finalizer, which only it removes
+   (otherwise they stay `Terminating`). `kubectl delete backupschedules,backuprequests -A --all`
+   (only if nothing else uses these CRDs). v0.4 uses its own finalizer name and never touches v0.3's.
+2. **Stop the old operator**: `kubectl -n backup-operator scale deploy/backup-operator --replicas=0`.
+3. **Check for leftovers** from failed v0.3 runs and remove them normally (never by removing finalizers):
    `kubectl get volumesnapshots -A -l app.kubernetes.io/created-by=backup-operator`.
-3. **Note your schedules** (`kubectl get backupschedules -A -o yaml`), then delete the v0.3 objects:
-   `kubectl delete backupschedules,backuprequests -A --all` (only if nothing else uses these CRDs).
 4. **Old Backup records** (v0.3) stay readable, but they may contain worker log excerpts. Review and
    delete them when you no longer need them: `kubectl delete backups -n <ns> <name>`.
 5. **Credentials:** v0.3 copied an SSH key into application namespaces and didn't verify host keys.

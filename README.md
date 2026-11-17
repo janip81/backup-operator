@@ -112,6 +112,7 @@ ready, accumulating snapshots, stuck cleanup and a missing operator, and early o
 | `SCHEDULE_STARTING_DEADLINE_SECONDS` | `3600` | Ticks later than this are skipped, not run late |
 | `DEFAULT_STORAGE_CLASS` | cluster default | StorageClass for the temporary PVC |
 | `WORKER_OUTPUT_LIMIT` / `WORKER_TMP_LIMIT` | `10Gi` / `2Gi` | Worker scratch space |
+| `INVENTORY_RESYNC_SECONDS` | `600` | Full relist behind the snapshot/request inventory metrics |
 
 ## Development
 

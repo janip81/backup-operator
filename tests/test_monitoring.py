@@ -182,3 +182,77 @@ def test_alert_rules_use_existing_metrics():
         for rule in group["rules"]:
             for name in re.findall(r"backup_operator_[a-z_]+", rule["expr"]):
                 assert name in defined, f"{rule['alert']}: unknown metric {name}"
+
+
+def test_heaps_stay_bounded_while_the_oldest_snapshot_is_stuck():
+    ev = observability.snapshot_event
+    ev(event={"type": "ADDED"}, body=_snap("stuck", ns="churn", owned=False, deleting="2026-11-17T01:00:00Z"))
+    for i in range(10000):
+        ev(event={"type": "ADDED"}, body=_snap(f"c{i}", ns="churn", deleting="2026-11-17T02:00:00Z"))
+        ev(event={"type": "DELETED"}, body=_snap(f"c{i}", ns="churn"))
+    g = metrics._snap_groups[("churn", "data")]
+    assert len(g["names"]) == 1
+    assert len(g["created"]) + len(g["deleting"]) <= 2 * len(g["names"]) + 32
+    since = _val(metrics.SNAPSHOT_DELETING_SINCE, namespace="churn", pvc="data")
+    assert since == datetime(2026, 11, 17, 1, tzinfo=UTC).timestamp()
+    ev(event={"type": "DELETED"}, body=_snap("stuck", ns="churn", owned=False))
+    assert ("churn", "data") not in metrics._snap_groups
+
+
+class _ListKube:
+    def __init__(self, objs):
+        self.objs = objs
+
+    def list_all(self, group, version, plural):
+        return self.objs.get(plural, [])
+
+
+def test_resync_removes_objects_whose_delete_was_missed():
+    observability.snapshot_event(event={"type": "ADDED"}, body=_snap("missed", ns="rs"))
+    observability.snapshot_event(event={"type": "ADDED"}, body=_snap("kept", ns="rs"))
+    observability.request_event(event={"type": "ADDED"}, body={
+        "metadata": {"name": "missed-req", "namespace": "rs"}, "spec": {"repository": {}}})
+    assert _val(metrics.OWNED_SNAPSHOTS, namespace="rs", pvc="data") == 2
+    # the watch reconnected (410 Gone) and never delivered DELETED for "missed"
+    snaps = [_snap(n, ns=other_ns) for n, other_ns in ((s[1], s[0]) for s in metrics._snaps) if n != "missed"]
+    reqs = [{"metadata": {"name": k.split("/", 1)[1], "namespace": k.split("/", 1)[0]},
+             "spec": {"repository": {}} if ph != "Legacy" else {},
+             "status": {"phase": ph}} for k, (ph, _) in metrics._requests.items() if k != "rs/missed-req"]
+    observability.resync_inventory(_ListKube({"volumesnapshots": snaps, "backuprequests": reqs}), 1_000_000.0)
+    assert _val(metrics.OWNED_SNAPSHOTS, namespace="rs", pvc="data") == 1
+    assert "rs/missed-req" not in metrics._requests
+    assert metrics.INVENTORY_SYNCED._value.get() == 1_000_000.0
+    first = metrics.INVENTORY_FIRST_SYNC._value.get()
+    observability.resync_inventory(_ListKube({"volumesnapshots": snaps, "backuprequests": reqs}), 2_000_000.0)
+    assert metrics.INVENTORY_FIRST_SYNC._value.get() == first  # set once per process
+
+
+def test_list_all_follows_continue_tokens():
+    pages = [{"items": [1, 2], "metadata": {"continue": "t1"}}, {"items": [3], "metadata": {}}]
+    seen = []
+
+    def fake(*args, **kw):
+        seen.append(kw.get("_continue"))
+        return pages[len(seen) - 1]
+
+    k = kube_mod.Kube.__new__(kube_mod.Kube)
+    k.limiter = kube_mod.RateLimiter(1000, 1000)
+    k.timeout = (1, 1)
+    k.custom = type("C", (), {"list_cluster_custom_object": staticmethod(fake)})()
+    assert k.list_all("g", "v", "p") == [1, 2, 3]
+    assert seen == [None, "t1"]
+
+
+def test_operator_uses_its_own_finalizer(monkeypatch):
+    """kopf strips "its" finalizer from watched objects no handler needs it for; with the shared default
+    that would touch v0.3 requests and snapshots of other kopf operators."""
+    import logging
+
+    import kopf
+
+    import controller.__main__ as main
+    monkeypatch.setattr(main, "start_http_server", lambda port: None)
+    settings = kopf.OperatorSettings()
+    default = settings.persistence.finalizer
+    main.startup(settings=settings, logger=logging.getLogger("t"))
+    assert settings.persistence.finalizer == "backup.techmonkeys.se/cleanup" != default

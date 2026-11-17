@@ -163,7 +163,9 @@ tests:
   - name: cluster-wide snapshot growth, whoever creates them
     interval: 1m
     input_series:
-      - series: 'backup_operator_cluster_volume_snapshots{namespace="other"}'
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="a"}'
+        values: '60x200'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="a",namespace="other"}'
         values: '5x60 5+1x60'
     alert_rule_test:
       - eval_time: 60m
@@ -176,6 +178,68 @@ tests:
             exp_annotations:
               summary: "29 more VolumeSnapshots in the cluster than an hour ago"
               description: Counts every VolumeSnapshot, whoever created it. Find the namespace on the Backup Operator dashboard; if it's the operator, scale it to 0.
+
+  - name: a partial startup replay is not growth
+    interval: 1m
+    input_series:
+      # the new process only saw 30 of 100 snapshots in its first scrape, completed its sync at 2m
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="a"}'
+        values: '_ 120x200'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="a",namespace="other"}'
+        values: '30 100x200'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+      - eval_time: 63m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+
+  - name: a rollout with two pods exporting does not double the count
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="old"}'
+        values: '0x200'
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="new"}'
+        values: '_x89 5400x110'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="old",namespace="other"}'
+        values: '90x100'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="new",namespace="other"}'
+        values: '_x89 90x110'
+      - series: 'backup_operator_requests{instance="old",phase="Succeeded"}'
+        values: '150x100'
+      - series: 'backup_operator_requests{instance="new",phase="Succeeded"}'
+        values: '_x89 150x110'
+    alert_rule_test:
+      - eval_time: 95m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: BackupClusterSnapshotsHigh
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: BackupRequestsGrowing
+        exp_alerts: []
+      - eval_time: 98m
+        alertname: BackupRequestHistoryTooLarge
+        exp_alerts: []
+
+  - name: inventory relist failing
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_inventory_synced_timestamp_seconds'
+        values: '60x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BackupInventoryStale
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: BackupInventoryStale
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: The backup operator's snapshot inventory hasn't been refreshed
+              description: The periodic relist (INVENTORY_RESYNC_SECONDS, default 600) keeps failing, so snapshot and request metrics may be stale. Check the operator logs and RBAC.
 
   - name: unfinished requests piling up; legacy and finished ones excluded
     interval: 1m

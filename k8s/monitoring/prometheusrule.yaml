@@ -111,14 +111,21 @@ spec:
             description: Leftover contents can hold backend snapshots and count against per-volume limits. Check their deletionPolicy and whether the backend snapshot still exists.
 
         - alert: BackupClusterSnapshotsGrowing
-          expr: sum(backup_operator_cluster_volume_snapshots) - sum(backup_operator_cluster_volume_snapshots offset 1h) > 20
+          # max by instance: two pods during a rollout must not double the count. Waits until this
+          # process completed a full inventory an hour ago, so a partial startup replay can't fire it.
+          expr: |
+            (
+              max(sum by (instance) (backup_operator_cluster_volume_snapshots))
+                - max(sum by (instance) (backup_operator_cluster_volume_snapshots offset 1h))
+            ) > 20
+            and on() (time() - max(backup_operator_inventory_first_sync_timestamp_seconds) > 3600)
           labels: {severity: critical}
           annotations:
             summary: "{{ $value }} more VolumeSnapshots in the cluster than an hour ago"
             description: Counts every VolumeSnapshot, whoever created it. Find the namespace on the Backup Operator dashboard; if it's the operator, scale it to 0.
 
         - alert: BackupClusterSnapshotsHigh
-          expr: sum(backup_operator_cluster_volume_snapshots) > 100
+          expr: max(sum by (instance) (backup_operator_cluster_volume_snapshots)) > 100
           for: 1h
           labels: {severity: warning}
           annotations:
@@ -126,7 +133,7 @@ spec:
             description: Adjust the threshold to what your cluster normally holds.
 
         - alert: BackupRequestsPilingUp
-          expr: sum(backup_operator_requests{phase!~"Succeeded|Failed|Legacy"}) > 10
+          expr: max(sum by (instance) (backup_operator_requests{phase!~"Succeeded|Failed|Legacy"})) > 10
           for: 30m
           labels: {severity: critical}
           annotations:
@@ -135,7 +142,11 @@ spec:
 
         - alert: BackupRequestsGrowing
           expr: |
-            sum(backup_operator_requests) - sum(backup_operator_requests offset 1h) > 20
+            (
+              max(sum by (instance) (backup_operator_requests))
+                - max(sum by (instance) (backup_operator_requests offset 1h))
+            ) > 20
+            and on() (time() - max(backup_operator_inventory_first_sync_timestamp_seconds) > 3600)
           labels: {severity: critical}
           annotations:
             summary: "{{ $value }} more BackupRequests than an hour ago"
@@ -151,7 +162,7 @@ spec:
             description: Look at the oldest non-terminal request's phase, reason and lastError.
 
         - alert: BackupRequestHistoryTooLarge
-          expr: sum(backup_operator_requests) > 200
+          expr: max(sum by (instance) (backup_operator_requests)) > 200
           for: 1h
           labels: {severity: warning}
           annotations:
@@ -159,12 +170,20 @@ spec:
             description: Finished requests should be pruned by the schedules' history limits. Large numbers of objects slow the controller and the API server.
 
         - alert: BackupLegacyRequestsPresent
-          expr: backup_operator_requests{phase="Legacy"} > 0
+          expr: max(backup_operator_requests{phase="Legacy"}) > 0
           for: 24h
           labels: {severity: info}
           annotations:
             summary: "{{ $value }} v0.3 BackupRequests are left"
             description: v0.4 ignores them. Delete them as described in docs/upgrade-0.4.md.
+
+        - alert: BackupInventoryStale
+          expr: time() - max(backup_operator_inventory_synced_timestamp_seconds) > 3 * 600
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: The backup operator's snapshot inventory hasn't been refreshed
+            description: The periodic relist (INVENTORY_RESYNC_SECONDS, default 600) keeps failing, so snapshot and request metrics may be stale. Check the operator logs and RBAC.
 
         - alert: BackupOperatorForbidden
           expr: sum by (code) (increase(backup_operator_api_errors_total{code="403"}[15m])) > 0
