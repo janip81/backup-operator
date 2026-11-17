@@ -83,11 +83,12 @@ def request_event(event, body, **_):
 
 
 def resync_inventory(kube, now: float) -> None:
+    since = metrics.resync_begin()
     snaps = kube.list_all("snapshot.storage.k8s.io", "v1", "volumesnapshots")
     contents = kube.list_all("snapshot.storage.k8s.io", "v1", "volumesnapshotcontents")
     requests = kube.list_all(cfg.GROUP, cfg.VERSION, "backuprequests")
     metrics.resync([snapshot_fields(b) for b in snaps], [content_fields(b) for b in contents],
-                   [request_fields(b) for b in requests], now)
+                   [request_fields(b) for b in requests], now, since)
 
 
 def _resync_loop(stop: threading.Event) -> None:

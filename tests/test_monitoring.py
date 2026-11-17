@@ -256,3 +256,52 @@ def test_operator_uses_its_own_finalizer(monkeypatch):
     default = settings.persistence.finalizer
     main.startup(settings=settings, logger=logging.getLogger("t"))
     assert settings.persistence.finalizer == "backup.techmonkeys.se/cleanup" != default
+
+
+class _RacingKube(_ListKube):
+    """Delivers watch events while the relist is in flight (after its list snapshot was taken)."""
+
+    def __init__(self, objs, during):
+        super().__init__(objs)
+        self.during = during
+
+    def list_all(self, group, version, plural):
+        items = super().list_all(group, version, plural)
+        for fn in self.during.pop(plural, []):
+            fn()
+        return items
+
+
+def test_relist_never_overrides_newer_watch_events():
+    ev, cev, rev = observability.snapshot_event, observability.snapshot_content_event, observability.request_event
+    ev(event={"type": "ADDED"}, body=_snap("deleted-during", ns="race"))
+    cev(event={"type": "ADDED"}, body={"metadata": {"name": "race-c-del", "creationTimestamp": "2026-11-17T03:00:00Z"},
+                                       "spec": {"volumeSnapshotRef": {"namespace": "race", "name": "x"}}})
+    req = {"metadata": {"name": "finishing", "namespace": "race", "creationTimestamp": "2026-11-17T03:00:00Z"},
+           "spec": {"repository": {}}, "status": {"phase": "Running"}}
+    rev(event={"type": "ADDED"}, body=req)
+    done = {**req, "status": {"phase": "Succeeded"}}
+    others = [_snap(n, ns=ns) for ns, n in metrics._snaps if ns != "race"]
+    lists = {
+        # stale lists: taken before the watch events below
+        "volumesnapshots": [*others, _snap("deleted-during", ns="race")],
+        "volumesnapshotcontents": [{"metadata": {"name": "race-c-del", "creationTimestamp": "2026-11-17T03:00:00Z"},
+                                    "spec": {"volumeSnapshotRef": {"namespace": "race", "name": "x"}}}],
+        "backuprequests": [req],
+    }
+    during = {
+        "volumesnapshots": [lambda: ev(event={"type": "ADDED"}, body=_snap("added-during", ns="race")),
+                            lambda: ev(event={"type": "DELETED"}, body=_snap("deleted-during", ns="race"))],
+        "volumesnapshotcontents": [lambda: cev(event={"type": "DELETED"},
+                                               body={"metadata": {"name": "race-c-del"}, "spec": {}})],
+        "backuprequests": [lambda: rev(event={"type": "MODIFIED"}, body=done)],
+    }
+    observability.resync_inventory(_RacingKube(lists, during), 3_000_000.0)
+    assert ("race", "added-during") in metrics._snaps       # ADDED after an older list is kept
+    assert ("race", "deleted-during") not in metrics._snaps  # DELETED isn't resurrected
+    assert "race-c-del" not in metrics._contents
+    assert metrics._requests["race/finishing"][0] == "Succeeded"  # not rolled back to Running
+    # the next relist (with fresh lists) is authoritative again
+    lists["volumesnapshots"] = others
+    observability.resync_inventory(_ListKube(lists), 3_000_600.0)
+    assert ("race", "added-during") not in metrics._snaps
