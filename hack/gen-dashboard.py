@@ -2,9 +2,19 @@
 """Generate k8s/monitoring/grafana/backup-operator.json (run: make dashboard). Edit this file, not the JSON."""
 import json
 import pathlib
+import re
 
 DS = {"type": "prometheus", "uid": "${datasource}"}
 NS = 'namespace=~"$namespace"'
+# Central Prometheus setups hold several clusters, told apart by k8s_cluster. "All" matches series
+# without the label too, so single-cluster setups work unchanged.
+CLUSTER = 'k8s_cluster=~"$cluster"'
+_METRIC = re.compile(r'\b(backup_operator_[a-z_]+|ALERTS|kube_[a-z_]+|container_[a-z_]+)(\{)?')
+
+
+def with_cluster(expr):
+    """Add the cluster matcher to every metric selector in a query."""
+    return _METRIC.sub(lambda m: f"{m.group(1)}{{{CLUSTER}, " if m.group(2) else f"{m.group(1)}{{{CLUSTER}}}", expr)
 _id = 0
 _y = 0
 
@@ -16,7 +26,7 @@ def nid():
 
 
 def target(expr, legend="", instant=False, fmt=None):
-    t = {"datasource": DS, "expr": expr, "legendFormat": legend, "refId": chr(64 + nid() % 26 or 26)}
+    t = {"datasource": DS, "expr": with_cluster(expr), "legendFormat": legend, "refId": chr(64 + nid() % 26 or 26)}
     if instant:
         t["instant"], t["range"] = True, False
     if fmt:
@@ -60,6 +70,27 @@ def ts(title, targets, w=12, unit="none", stack=False, bars=False, desc=""):
                         "tooltip": {"mode": "multi", "sort": "desc"}}}
 
 
+def table(title, queries, w=12, desc="", overrides=None):
+    """Instant queries merged into one row per (namespace, source)."""
+    targets = []
+    for expr, ref in queries:
+        t = target(expr, instant=True, fmt="table")
+        t["refId"] = ref
+        targets.append(t)
+    return {"type": "table", "title": title, "description": desc, "id": nid(), "datasource": DS, "_w": w,
+            "targets": targets,
+            "transformations": [
+                {"id": "merge", "options": {}},
+                {"id": "organize", "options": {
+                    "excludeByName": {"Time": True},
+                    "indexByName": {"namespace": 0, "source": 1},
+                    "renameByName": {f"Value #{ref}": ref for _, ref in queries}}},
+                {"id": "filterFieldsByName", "options": {"include": {
+                    "names": ["namespace", "source", *[ref for _, ref in queries]]}}}],
+            "fieldConfig": {"defaults": {"custom": {"align": "auto"}}, "overrides": overrides or []},
+            "options": {"showHeader": True, "sortBy": [{"displayName": "namespace"}]}}
+
+
 def red_over(v):
     return [{"color": "green", "value": None}, {"color": "red", "value": v}]
 
@@ -93,15 +124,28 @@ panels += place([
      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
          {"color": "green", "value": None}, {"color": "orange", "value": 86400}, {"color": "red", "value": 172800}]}},
          "overrides": []}},
-    ts("Schedule ready", [target(f"backup_operator_schedule_ready{{{NS}}}", "{{namespace}}/{{source}}")],
-       w=12, desc="1 = source volume, credentials and repository settings are valid."),
+    table("Schedules", [
+        (f"max by (namespace, source) (backup_operator_schedule_ready{{{NS}}})", "Ready"),
+        (f"max by (namespace, source) (time() - backup_operator_last_success_timestamp_seconds{{{NS}}})",
+         "Last success"),
+        (f"max by (namespace, source) (time() - backup_operator_last_failure_timestamp_seconds{{{NS}}})",
+         "Last failure"),
+        (f"max by (namespace, source) (backup_operator_schedule_interval_seconds{{{NS}}})", "Interval"),
+    ], w=12, desc="Ready: source volume, credentials and repository settings are valid. Times are ages.",
+        overrides=[
+            {"matcher": {"id": "byName", "options": "Ready"}, "properties": [
+                {"id": "mappings", "value": [{"type": "value", "options": {
+                    "1": {"text": "Ready", "color": "green"}, "0": {"text": "Not ready", "color": "red"}}}]},
+                {"id": "custom.cellOptions", "value": {"type": "color-background"}}]},
+            *[{"matcher": {"id": "byName", "options": n}, "properties": [{"id": "unit", "value": "s"}]}
+              for n in ("Last success", "Last failure", "Interval")]]),
 ], 8)
 panels += place([
     ts("Runs per day by result", [target(
-        f"sum by (namespace, source, result) (increase(backup_operator_runs_total{{{NS}}}[1d]))",
+        f"round(sum by (namespace, source, result) (increase(backup_operator_runs_total{{{NS}}}[1d])))",
         "{{namespace}}/{{source}} {{result}}")], w=8, bars=True, stack=True),
     ts("Failed attempts by reason (per hour)", [target(
-        f"sum by (reason) (increase(backup_operator_attempt_failures_total{{{NS}}}[1h]))", "{{reason}}")],
+        f"round(sum by (reason) (increase(backup_operator_attempt_failures_total{{{NS}}}[1h])))", "{{reason}}")],
         w=8, bars=True, stack=True),
     ts("Run duration p95", [target(
         f"histogram_quantile(0.95, sum by (namespace, source, le) "
@@ -125,7 +169,7 @@ panels += place([
 ], 4)
 panels += place([
     ts("Snapshots created per hour, per volume", [target(
-        f"sum by (namespace, pvc) (increase(backup_operator_snapshots_created_total{{{NS}}}[1h]))",
+        f"round(sum by (namespace, pvc) (increase(backup_operator_snapshots_created_total{{{NS}}}[1h])))",
         "{{namespace}}/{{pvc}}")], w=8, desc="BackupSnapshotStorm fires above 4 per hour for one volume."),
     ts("Operator-owned snapshots per volume", [target(
         f"backup_operator_owned_snapshots{{{NS}}}", "{{namespace}}/{{pvc}}")], w=8,
@@ -149,8 +193,9 @@ panels += place([
         'sum(increase(kube_pod_container_status_restarts_total{container="controller", '
         'pod=~"backup-operator-.*"}[1h]))', "restarts/h")], w=12),
     ts("Operator memory (cAdvisor)", [target(
-        'sum(container_memory_working_set_bytes{container="controller", pod=~"backup-operator-.*"})',
-        "working set")], w=12, unit="bytes"),
+        # max: cAdvisor reports the container and its cgroup scope separately; a sum doubles it
+        'max by (pod) (container_memory_working_set_bytes{container="controller", pod=~"backup-operator-.*"})',
+        "{{pod}}")], w=12, unit="bytes"),
 ], 6)
 
 dash = {
@@ -160,9 +205,14 @@ dash = {
     "templating": {"list": [
         {"name": "datasource", "type": "datasource", "query": "prometheus", "label": "Data source",
          "current": {}, "hide": 0},
+        {"name": "cluster", "type": "query", "datasource": DS, "label": "Cluster",
+         "query": {"query": "label_values(backup_operator_active_runs, k8s_cluster)", "refId": "cluster"},
+         "definition": "label_values(backup_operator_active_runs, k8s_cluster)",
+         "refresh": 2, "multi": True, "includeAll": True, "allValue": ".*", "current": {}, "hide": 0},
         {"name": "namespace", "type": "query", "datasource": DS, "label": "Namespace",
-         "query": {"query": "label_values(backup_operator_schedule_interval_seconds, namespace)", "refId": "ns"},
-         "definition": "label_values(backup_operator_schedule_interval_seconds, namespace)",
+         "query": {"query": f"label_values(backup_operator_schedule_interval_seconds{{{CLUSTER}}}, namespace)",
+                   "refId": "ns"},
+         "definition": f"label_values(backup_operator_schedule_interval_seconds{{{CLUSTER}}}, namespace)",
          "refresh": 2, "multi": True, "includeAll": True, "allValue": ".*", "current": {}, "hide": 0},
     ]},
     "annotations": {"list": []},

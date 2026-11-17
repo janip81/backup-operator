@@ -305,3 +305,55 @@ def test_relist_never_overrides_newer_watch_events():
     lists["volumesnapshots"] = others
     observability.resync_inventory(_ListKube(lists), 3_000_600.0)
     assert ("race", "added-during") not in metrics._snaps
+
+
+
+def _record(name, completed, phase="Succeeded", ns="rec", source="nightly", legacy=False):
+    spec = {"source": source, "sourceNamespace": ns}
+    if not legacy:
+        spec["requestRef"] = {"uid": f"uid-{name}"}
+    return {"metadata": {"name": name, "namespace": ns}, "spec": spec,
+            "status": {"phase": phase, "completedAt": completed}}
+
+
+def test_v03_records_are_not_counted():
+    observability.backup_event(event={"type": "ADDED"},
+                               body=_record("old", "2026-03-01T03:00:00Z", ns="legacy-ns", source="legacy", legacy=True))
+    assert _val(metrics.LAST_SUCCESS, namespace="legacy-ns", source="legacy") is None
+
+
+def test_deleting_records_lowers_or_removes_last_success():
+    ev = observability.backup_event
+    ev(event={"type": "ADDED"}, body=_record("r1", "2026-11-10T03:00:00Z"))
+    ev(event={"type": "ADDED"}, body=_record("r2", "2026-11-12T03:00:00Z"))
+    assert _val(metrics.LAST_SUCCESS, namespace="rec", source="nightly") == datetime(2026, 11, 12, 3, tzinfo=UTC).timestamp()
+    ev(event={"type": "DELETED"}, body=_record("r2", "2026-11-12T03:00:00Z"))
+    assert _val(metrics.LAST_SUCCESS, namespace="rec", source="nightly") == datetime(2026, 11, 10, 3, tzinfo=UTC).timestamp()
+    ev(event={"type": "DELETED"}, body=_record("r1", "2026-11-10T03:00:00Z"))
+    assert _val(metrics.LAST_SUCCESS, namespace="rec", source="nightly") is None  # source forgotten
+
+
+def test_counters_start_at_zero_for_known_sources():
+    """A counter that first appears at 1 has no increase in Prometheus; known sources start at 0."""
+    metrics.init_source("zero", "nightly", "data")
+    assert _val(metrics.RUNS, namespace="zero", source="nightly", result="failed") == 0
+    assert _val(metrics.RUNS, namespace="zero", source="nightly", result="succeeded") == 0
+    assert _val(metrics.ATTEMPT_FAILURES, namespace="zero", source="nightly", reason="SnapshotError") == 0
+    assert _val(metrics.SNAPSHOTS_CREATED, namespace="zero", pvc="data") == 0
+
+
+def test_failure_reasons_list_is_complete():
+    """Every reason the controller can raise is pre-initialised."""
+    import re
+    raised = set()
+    for f in ("controller/engine.py", "controller/jobspec.py"):
+        src = (ROOT / f).read_text()
+        raised |= set(re.findall(r'AttemptFailed\("([A-Za-z]+)"', src))
+        raised |= set(re.findall(r'return "([A-Z][A-Za-z]+)", ', src))
+    assert raised <= set(metrics.FAILURE_REASONS), raised - set(metrics.FAILURE_REASONS)
+
+
+def test_dashboard_filters_every_query_by_cluster():
+    for title, expr in _exprs():
+        for m in re.finditer(r"\b(backup_operator_[a-z_]+|ALERTS|kube_[a-z_]+|container_[a-z_]+)\{([^}]*)\}", expr):
+            assert 'k8s_cluster=~"$cluster"' in m.group(2), f"{title}: {m.group(0)}"

@@ -106,6 +106,7 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
     name, ns, uid = md["name"], md["namespace"], md["uid"]
     src_ns = _src_ns(spec, ns)
     metrics.SCHEDULE_INTERVAL.labels(namespace=src_ns, source=name).set(interval_seconds(spec, now))
+    metrics.init_source(src_ns, name, (spec.get("template") or {}).get("sourcePVC"))
     generation = md.get("generation", 1)
     ready_cond = next((c for c in status.get("conditions") or [] if c.get("type") == "Ready"), None)
 

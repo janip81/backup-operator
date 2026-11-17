@@ -437,9 +437,10 @@ def test_restart_in_any_phase_resumes_without_duplicates(kube, phase):
 def test_metrics_rebuilt_from_backup_events():
     from controller import metrics
     from controller.handlers import observability
-    for completed in ("2026-11-10T03:00:00Z", "2026-11-12T03:00:00Z", "2026-11-11T03:00:00Z"):
+    for i, completed in enumerate(("2026-11-10T03:00:00Z", "2026-11-12T03:00:00Z", "2026-11-11T03:00:00Z")):
         observability.backup_event(event={"type": "ADDED"}, body={
-            "metadata": {"name": "x", "namespace": "app"}, "spec": {"source": "nightly", "sourceNamespace": "app"},
+            "metadata": {"name": f"x{i}", "namespace": "app"},
+            "spec": {"source": "nightly", "sourceNamespace": "app", "requestRef": {"uid": f"u{i}"}},
             "status": {"phase": "Succeeded", "completedAt": completed}})
     val = metrics.LAST_SUCCESS.labels(namespace="app", source="nightly")._value.get()
     assert val == datetime(2026, 11, 12, 3, tzinfo=UTC).timestamp()
