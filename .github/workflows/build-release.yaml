@@ -3,6 +3,8 @@ name: Build and Release Docker Images
 # PRs: lint + tests + image builds (nothing is pushed).
 # Pushes to main/develop: same checks, then push branch and sha-<commit> tags.
 # Version tags (vX.Y.Z): push X.Y.Z, X.Y and latest.
+# Only images whose inputs changed are built (see the changes job); release tags always build both,
+# so a release has both images. Deployments pin the controller and worker tags separately.
 # X.Y.Z and sha-<commit> tags are immutable: the build fails instead of replacing them.
 on:
   pull_request:
@@ -44,15 +46,53 @@ jobs:
       - name: Alert rule tests (promtool)
         run: ./hack/test-rules.sh
 
+  # Which images need a build: a dashboard, manifest or test-only change builds none.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      components: ${{ steps.pick.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          filters: |
+            controller:
+              - 'controller/**'
+              - '.github/workflows/build-release.yaml'
+            worker:
+              - 'worker/**'
+              - 'tests/worker/**'
+              - '.github/workflows/build-release.yaml'
+      - name: Pick images
+        id: pick
+        env:
+          RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          CONTROLLER: ${{ steps.filter.outputs.controller }}
+          WORKER: ${{ steps.filter.outputs.worker }}
+        run: |
+          set -euo pipefail
+          list=()
+          if [[ $RELEASE == true || $CONTROLLER == true ]]; then list+=('"controller"'); fi
+          if [[ $RELEASE == true || $WORKER == true ]]; then list+=('"worker"'); fi
+          json="[$(IFS=,; echo "${list[*]:-}")]"
+          echo "components=$json" >> "$GITHUB_OUTPUT"
+          echo "Images to build: $json"
+
   build:
-    needs: check
+    needs: [check, changes]
+    if: needs.changes.outputs.components != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     strategy:
       matrix:
-        component: [controller, worker]
+        component: ${{ fromJSON(needs.changes.outputs.components) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
