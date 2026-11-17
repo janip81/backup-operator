@@ -1,0 +1,318 @@
+rule_files: [rules.yaml]
+evaluation_interval: 1m
+tests:
+  - name: first failure of a source fires without a baseline
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x60'
+      - series: 'backup_operator_last_failure_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '_x10 600x50'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BackupLatestRunFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BackupLatestRunFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "Latest backup run failed for app/nightly"
+              description: Check the newest Backup record and the BackupRequest status for the reason.
+
+  - name: a later success clears the failure
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x60'
+      - series: 'backup_operator_last_failure_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '600x60'
+      - series: 'backup_operator_last_success_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '0x30 1800x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupLatestRunFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "Latest backup run failed for app/nightly"
+              description: Check the newest Backup record and the BackupRequest status for the reason.
+      - eval_time: 45m
+        alertname: BackupLatestRunFailed
+        exp_alerts: []
+
+  - name: stale backup relative to the schedule interval
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x200'
+      - series: 'backup_operator_last_success_timestamp_seconds{namespace="app",source="nightly"}'
+        values: '0x200'
+      - series: 'backup_operator_schedule_interval_seconds{namespace="app",source="nightly"}'
+        values: '3600x200'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "No successful backup for app/nightly"
+              description: The newest successful backup is older than 1.5x the schedule interval.
+
+  - name: operator down
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x5 _x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BackupOperatorDown
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Backup operator metrics are missing
+              description: The operator isn't running or isn't scraped, so no backups are being taken or tracked.
+
+  - name: schedule not ready
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_active_runs'
+        values: '0x60'
+      - series: 'backup_operator_schedule_ready{namespace="app",source="nightly"}'
+        values: '1x10 0x50'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupScheduleNotReady
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BackupScheduleNotReady
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, source: nightly}
+            exp_annotations:
+              summary: "Schedule app/nightly is not ready"
+              description: Its source volume, credentials or repository settings are invalid, so its runs are skipped. See the schedule's Ready condition.
+
+
+  - name: snapshot storm fires per PVC; many healthy volumes in one namespace do not
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="runaway"}'
+        values: '0+1x60'
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="a"}'
+        values: '0 1x59'
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="b"}'
+        values: '0 1x59'
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="c"}'
+        values: '0 1 2 3x57'
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="d"}'
+        values: '0 1x59'
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="e"}'
+        values: '0 1x59'
+      - series: 'backup_operator_snapshots_created_total{namespace="app",pvc="f"}'
+        values: '0 1x59'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BackupSnapshotStorm
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BackupSnapshotStorm
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: app, pvc: runaway}
+            exp_annotations:
+              summary: "30 VolumeSnapshots of app/runaway created in the last hour"
+              description: A run creates one snapshot per attempt (three attempts by default). Scale the operator to 0 replicas, then check the newest BackupRequests and the CSI snapshotter logs.
+
+  - name: a second snapshot of one volume is critical; one per volume is normal
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_owned_snapshots{namespace="app",pvc="a"}'
+        values: '1x60'
+      - series: 'backup_operator_owned_snapshots{namespace="app",pvc="b"}'
+        values: '1x60'
+      - series: 'backup_operator_owned_snapshots{namespace="app",pvc="c"}'
+        values: '2x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: BackupSnapshotsAccumulating
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: app, pvc: c}
+            exp_annotations:
+              summary: "2 operator-owned VolumeSnapshots of app/c"
+              description: Only one should exist, and only while a run is active. Scale the operator to 0 and check for stuck cleanup before the storage's per-volume snapshot limit is reached.
+
+  - name: a snapshot that keeps deleting is reported after 30 minutes
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_snapshot_deleting_since_timestamp_seconds{namespace="app",pvc="data"}'
+        values: '60x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupSnapshotDeletionStuck
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BackupSnapshotDeletionStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: app, pvc: data}
+            exp_annotations:
+              summary: "A VolumeSnapshot of app/data has been deleting for 39m 0s"
+              description: The snapshot controller or the CSI driver can't delete it, so the backend snapshot may stay. Check the VolumeSnapshotContent events and the CSI controller logs; never remove finalizers by hand.
+
+  - name: cluster-wide snapshot growth, whoever creates them
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="a"}'
+        values: '60x200'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="a",namespace="other"}'
+        values: '5x60 5+1x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "29 more VolumeSnapshots in the cluster than an hour ago"
+              description: Counts every VolumeSnapshot, whoever created it. Find the namespace on the Backup Operator dashboard; if it's the operator, scale it to 0.
+
+  - name: a partial startup replay is not growth
+    interval: 1m
+    input_series:
+      # the new process only saw 30 of 100 snapshots in its first scrape, completed its sync at 2m
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="a"}'
+        values: '_ 120x200'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="a",namespace="other"}'
+        values: '30 100x200'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+      - eval_time: 63m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+
+  - name: a rollout with two pods exporting does not double the count
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="old"}'
+        values: '0x200'
+      - series: 'backup_operator_inventory_first_sync_timestamp_seconds{instance="new"}'
+        values: '_x89 5400x110'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="old",namespace="other"}'
+        values: '90x100'
+      - series: 'backup_operator_cluster_volume_snapshots{instance="new",namespace="other"}'
+        values: '_x89 90x110'
+      - series: 'backup_operator_requests{instance="old",phase="Succeeded"}'
+        values: '150x100'
+      - series: 'backup_operator_requests{instance="new",phase="Succeeded"}'
+        values: '_x89 150x110'
+    alert_rule_test:
+      - eval_time: 95m
+        alertname: BackupClusterSnapshotsGrowing
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: BackupClusterSnapshotsHigh
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: BackupRequestsGrowing
+        exp_alerts: []
+      - eval_time: 98m
+        alertname: BackupRequestHistoryTooLarge
+        exp_alerts: []
+
+  - name: inventory relist failing
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_inventory_synced_timestamp_seconds'
+        values: '60x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BackupInventoryStale
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: BackupInventoryStale
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: The backup operator's snapshot inventory hasn't been refreshed
+              description: The periodic relist (INVENTORY_RESYNC_SECONDS, default 600) keeps failing, so snapshot and request metrics may be stale. Check the operator logs and RBAC.
+
+  - name: unfinished requests piling up; legacy and finished ones excluded
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_requests{phase="Pending"}'
+        values: '12x60'
+      - series: 'backup_operator_requests{phase="Succeeded"}'
+        values: '50x60'
+      - series: 'backup_operator_requests{phase="Legacy"}'
+        values: '40x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupRequestsPilingUp
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BackupRequestsPilingUp
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "12 unfinished BackupRequests"
+              description: Requests are created faster than they finish. Check the schedules' overlap policy and the oldest pending request's reason.
+
+  - name: no pile-up below the threshold
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_requests{phase="Running"}'
+        values: '1x60'
+      - series: 'backup_operator_requests{phase="Legacy"}'
+        values: '40x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: BackupRequestsPilingUp
+        exp_alerts: []
+
+  - name: an old unfinished request is reported, none at all is not
+    interval: 10m
+    input_series:
+      - series: 'backup_operator_oldest_unfinished_request_created_timestamp_seconds'
+        values: '0x20 3600x60'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: BackupRequestStuck
+        exp_alerts: []
+      - eval_time: 8h
+        alertname: BackupRequestStuck
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: A BackupRequest has been unfinished for more than 6 hours
+              description: Look at the oldest non-terminal request's phase, reason and lastError.
+
+  - name: API errors keep their status code; a single 403 burst is enough
+    interval: 1m
+    input_series:
+      - series: 'backup_operator_api_errors_total{code="500"}'
+        values: '0+6x60'
+      - series: 'backup_operator_api_errors_total{code="403"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackupOperatorApiErrors
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BackupOperatorApiErrors
+        exp_alerts:
+          - exp_labels: {severity: warning, code: "500"}
+            exp_annotations:
+              summary: "Backup operator API calls are failing with 500"
+              description: "100m failed calls per second. The operator retries with backoff; check API server and etcd health."
+      - eval_time: 40m
+        alertname: BackupOperatorForbidden
+        exp_alerts:
+          - exp_labels: {severity: warning, code: "403"}
+            exp_annotations:
+              summary: The backup operator is denied Kubernetes API access
+              description: Persistent 403 errors mean the ClusterRole doesn't match the controller version. Re-apply k8s/base.

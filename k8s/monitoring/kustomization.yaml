@@ -1,0 +1,6 @@
+# Optional, needs the Prometheus Operator CRDs: metrics scraping and alert rules.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - servicemonitor.yaml
+  - prometheusrule.yaml

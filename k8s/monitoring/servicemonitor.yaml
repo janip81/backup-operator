@@ -1,0 +1,17 @@
+# Add the labels your Prometheus selects ServiceMonitors by (serviceMonitorSelector).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backup-operator
+  namespace: backup-operator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backup-operator
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    # Keep the metrics' own namespace label (the backed-up app's namespace) instead of replacing it
+    # with the operator's namespace; the alerts and the dashboard group by it.
+    honorLabels: true

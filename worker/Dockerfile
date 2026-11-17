@@ -1,18 +1,16 @@
-# Minimal worker for transfer + custom scripts
-FROM alpine:3.19
+# Worker image: restic plus the built-in plugins. No kubectl and no Kubernetes API access by design.
+FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
 
-RUN apk add --no-cache bash coreutils ca-certificates openssh rsync tzdata curl \
-    && update-ca-certificates
+RUN apk add --no-cache bash coreutils findutils ca-certificates openssh-client tzdata \
+      'restic~0.18' 'sqlite~3.49' 'jq~1.8'
 
-# Optional: kubectl for custom scripts that want to interact with K8s
-ARG KUBECTL_VERSION=v1.30.4
-RUN curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
-    && chmod +x /usr/local/bin/kubectl
+COPY worker/bo-worker /usr/local/bin/bo-worker
+COPY worker/plugins/ /plugins/
+RUN chmod 0755 /usr/local/bin/bo-worker /plugins/*.sh
 
-# Non-root
-RUN adduser -D -u 10002 worker
-USER worker
-
-WORKDIR /work
-ENTRYPOINT ["/bin/bash", "-lc"]
-CMD ["echo Worker ready"]
+# The controller runs the pod as root with every capability dropped except DAC_READ_SEARCH
+# (read any file on the snapshot clone), a read-only root filesystem and no service account token.
+USER 10002
+WORKDIR /tmp
+ENTRYPOINT ["/usr/local/bin/bo-worker"]
+CMD ["backup"]

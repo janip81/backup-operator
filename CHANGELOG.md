@@ -5,6 +5,34 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v0.4.0] - unreleased
+### Overview
+Reliability and security rework (issues #8–#15) and a new storage model: restic snapshots with plugins.
+**Breaking:** see docs/upgrade-0.4.md.
+
+#### Added
+- Plugins `files`, `archives`, `sqlite`, `custom`; restic repositories (S3/REST over https, SFTP with
+  known_hosts); retention; optional verification; restore mode and example (#12)
+- Backup records for every finished run, written before cleanup; metrics rebuilt from cluster state;
+  PrometheusRule with unit tests (#11)
+- Schedule validation with a Ready condition, history limits, time zones, catch-up and overlap
+  policies (#9, #15)
+- kustomize base and monitoring component (#15)
+- Runaway guards: metrics and alerts for snapshot storms, piling-up requests, API errors and
+  restarts; Grafana dashboard (`k8s/monitoring/grafana`) (#11)
+
+#### Changed
+- Controller: resumable state machine with persisted attempts, backoff, admission limits and API rate
+  limiting; Python Kubernetes client with timeouts instead of kubectl (#8)
+- Ownership-checked cleanup with UID preconditions and a delete finalizer (#10)
+- Least-privilege RBAC, hardened pods, no credentials outside the Secret (#13)
+- CI validates PRs, tests the worker image, publishes immutable tags (#14)
+
+#### Removed
+- rsync/scp transfer, script presets, per-namespace RBAC and secret copying
+
+---
+
 ## [v0.3.0] - 2025-10-12
 ### 🚀 Overview
 Introduced automated backup scheduling via the new `BackupSchedule` CRD.

@@ -1,26 +1,19 @@
 # ============================================
 # Backup Operator Makefile
-# Builds and pushes both controller and worker images
+# Local builds and checks only. Published images are built by CI from committed code
+# (see .github/workflows/build-release.yaml). Pushing CI-owned tags by hand is refused.
 # ============================================
 
-REPO            := backup-operator
-ORG             := janip81
 REGISTRY        := ghcr.io
-IMAGE_BASE      := $(REGISTRY)/$(ORG)/$(REPO)
-TAG             ?= latest
-
-# Derived image names
+IMAGE_BASE      := $(REGISTRY)/janip81/backup-operator
+TAG             ?= local
 CONTROLLER_IMG  := $(IMAGE_BASE)-controller
 WORKER_IMG      := $(IMAGE_BASE)-worker
+PY_IMAGE        := python:3.13-slim
 
-.PHONY: all build push clean build-controller build-worker push-controller push-worker tag
+.PHONY: all build build-controller build-worker push guard-tag lint test check fix rules-test worker-test clean run-operator dashboard
 
-# Default target
 all: build
-
-# ============================================
-# Build Targets
-# ============================================
 
 build: build-controller build-worker
 
@@ -30,62 +23,43 @@ build-controller:
 build-worker:
 	docker build -t $(WORKER_IMG):$(TAG) -f worker/Dockerfile .
 
-# ============================================
-# Push Targets
-# ============================================
+# Only throwaway tags (local*, dev-*, test-*) may be pushed by hand.
+guard-tag:
+	@case "$(TAG)" in local*|dev-*|test-*) ;; *) echo "Refusing to push tag '$(TAG)': CI owns release tags (see #14)"; exit 1;; esac
 
-push: push-controller push-worker
-
-push-controller:
-	docker push $(CONTROLLER_IMG):$(TAG)
-
-push-worker:
-	docker push $(WORKER_IMG):$(TAG)
-
-# ============================================
-# Tag & Push Versioned Images
-# ============================================
-
-# Usage: make tag TAG=v0.1
-tag:
-	@if [ -z "$(TAG)" ]; then echo "❌ TAG not set! Use make tag TAG=v0.1"; exit 1; fi
-	@echo "🏷️  Tagging controller and worker images with $(TAG)..."
-	docker tag $(CONTROLLER_IMG):latest $(CONTROLLER_IMG):$(TAG)
-	docker tag $(WORKER_IMG):latest $(WORKER_IMG):$(TAG)
-	@echo "📤 Pushing both $(TAG) and latest tags to GHCR..."
+push: guard-tag
 	docker push $(CONTROLLER_IMG):$(TAG)
 	docker push $(WORKER_IMG):$(TAG)
-	docker push $(CONTROLLER_IMG):latest
-	docker push $(WORKER_IMG):latest
-	@echo "✅ Done — pushed controller and worker as $(TAG) and latest."
 
-# ============================================
-# Clean Targets
-# ============================================
+# Lint and tests run in a container so the host Python version doesn't matter.
+check:
+	docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
+	  -v "$(CURDIR):/src" -w /src $(PY_IMAGE) sh -c \
+	  "pip install -q --user --no-warn-script-location -r requirements-dev.txt && ~/.local/bin/ruff check --no-cache . && python -m pytest -q -p no:cacheprovider -o faulthandler_timeout=60"
+
+lint test: check
+
+# Regenerate the Grafana dashboard JSON from hack/gen-dashboard.py.
+dashboard:
+	python3 hack/gen-dashboard.py
+
+# Worker integration tests: real worker image, local restic repository, restore + hash comparison.
+worker-test: build-worker
+	WORKER_IMAGE=$(WORKER_IMG):$(TAG) ./tests/worker/test_worker.sh
+
+# Unit-test the alert rules with promtool (container).
+rules-test:
+	./hack/test-rules.sh
+
+# Apply ruff's safe autofixes.
+fix:
+	docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp \
+	  -v "$(CURDIR):/src" -w /src $(PY_IMAGE) sh -c \
+	  "pip install -q --user --no-warn-script-location ruff==0.17.5 && ~/.local/bin/ruff check --no-cache --fix ."
 
 clean:
-	-docker rmi $(CONTROLLER_IMG):$(TAG) || true
-	-docker rmi $(WORKER_IMG):$(TAG) || true
+	-docker rmi $(CONTROLLER_IMG):$(TAG) $(WORKER_IMG):$(TAG)
 
-# ============================================
-# Local test runs
-# ============================================
-
-run-worker:
-	docker run --rm -it \
-		-e SOURCE_NAMESPACE=home-assistant \
-		-e SOURCE_PVC=home-assistant-home-assistant \
-		-e SNAPSHOT_CLASS=vsphere-csi-snapclass \
-		-e BACKUP_NAMESPACE=backup \
-		-e REMOTE_PATH=backup@nas.example:/backups/test/ \
-		-e SSH_PRIVATE_KEY="$$(cat ~/.ssh/id_ed25519_backup)" \
-		$(WORKER_IMG):$(TAG)
-
-run-controller:
-	docker run --rm -it \
-		-v ~/.kube/config:/root/.kube/config:ro \
-		-e WORKER_IMAGE=$(WORKER_IMG):$(TAG) \
-		$(CONTROLLER_IMG):$(TAG)
-
+# Run against the current kube context. Use a disposable cluster only.
 run-operator:
-	PYTHONPATH=. kopf run -m controller -A
+	PYTHONPATH=. kopf run -m controller --all-namespaces --verbose

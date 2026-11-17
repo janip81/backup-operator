@@ -1,5 +1,6 @@
-kopf==1.37.4
-kubernetes==29.0.0
-PyYAML==6.0.2
-prometheus_client==0.16.0
-croniter==2.0.3
+# Runtime dependencies of the controller image (the only dependency list used by images).
+kopf==1.45.2
+kubernetes==37.0.2
+prometheus-client==0.26.0
+croniter==7.0.0
+PyYAML==6.0.3

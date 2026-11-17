@@ -1,0 +1,18 @@
+# Apps that write their own archives (e.g. Home Assistant into backups/): store only those archives.
+apiVersion: backup.techmonkeys.se/v1
+kind: BackupSchedule
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+spec:
+  schedule: "0 5 * * *"
+  template:
+    sourcePVC: home-assistant
+    snapshotClass: csi-snapclass
+    plugin:
+      name: archives
+      config: {dir: backups, pattern: "*.tar", newest: "3"}
+    repository:
+      url: s3:https://s3.example.com/backups/home-assistant
+      credentialsSecret: backup-repository
+    retention: {keepLast: 14}

@@ -4,186 +4,124 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/container-ghcr.io%2Fjanip81%2Fbackup--operator-blue)](https://github.com/janip81/backup-operator/pkgs/container/backup-operator-controller)
 
+A small Kubernetes operator (Python, [kopf](https://kopf.readthedocs.io/)) that backs up the data on
+PersistentVolumes: it snapshots the volume, lets a **plugin** pick what to keep, and stores it as a
+versioned, encrypted [restic](https://restic.net/) snapshot in S3, a REST server or over SFTP.
 
-A lightweight Kubernetes operator written in Python using **Kopf** for handling snapshot-based backups of PVCs.  
-Designed to work seamlessly across namespaces and clusters.
+> **Status (2026-11):** v0.4 is a rework of the operator (issues #8–#15). It is not released yet;
+> v0.4 has been tested with unit tests, worker integration tests and on a disposable kind cluster, not
+> yet in production. Try it on a non-production cluster first, and in production only after the
+> v0.4.0 release and a supervised first run (see
+> [docs/operations.md](docs/operations.md)). v0.3 objects must be migrated, see
+> [docs/upgrade-0.4.md](docs/upgrade-0.4.md).
 
-> **Status (2026-11):** paused for a reliability rework. Known problems with retries, cleanup, schedules,
-> retention and the build pipeline are tracked in [issues #8–#15](https://github.com/janip81/backup-operator/issues).
-> Don't use this in production until all of #8–#15 are resolved.
-
----
-
-## 🚀 Overview
-
-The **Backup Operator** automates creating, monitoring, and cleaning up **VolumeSnapshots** and temporary Jobs that back up application data to remote locations.
+## Why
 
 The idea came from that i always forget my own backups, i can be up and running from a distaster at home with Cluster-api in 10-15minutes but i always forget backups in my own applications
 and as i run ArgoCD for deployment of everything including my workload clusters velero did not feel like a good match as i dont want full PVC backups and my deployments are handles by gitops.
 
-So this project was born to solve that problem for me, it is not perfect but it works for me and maybe it can work for you too. It does snapshot and runs a custom bash script inside the worker
-container that rsync/scps the data to a remote location, it can be anything that is reachable from the cluster. and i dont need to save full 50gb PVC backups to my NAS every time i do a backup.
+So this project was born to solve that problem for me, it is not perfect but it works for me and maybe it can work for you too. Each run snapshots the volume, mounts a read-only copy in a short-lived
+worker, and a plugin decides what to store, so i dont need to save full 50gb PVC backups to my NAS every time i do a backup.
 
-It was designed primarily for Home Assistant, Zigbee2MQTT, and other workloads running on PVC-backed persistent storage, but it works generically for any namespace or application.
-
----
-
-## 🧩 Features
-
-- ✅ **Snapshot-based backups** using a `VolumeSnapshotClass`
-- ✅ Supports **vSphere-CSI**, Longhorn, and other CSI drivers
-- ✅ Handles **WaitForFirstConsumer** binding (auto pod trigger)
-- ✅ Automatic **ServiceAccount + RBAC creation** per namespace
-- ⚠️ Error handling and retries are being reworked (#8, #11)
-- ✅ **Prometheus metrics** exposed on `:8080/metrics`
-- ✅ Minimal dependencies — only Python + Kopf + Kubernetes client
-
----
-
-## 🧱 Architecture
+## How it works
 
 ```
-[CustomResource] --> [Backup Operator (Kopf)]
-                        ├── Creates VolumeSnapshot
-                        ├── Waits until snapshot Ready
-                        ├── Creates temporary PVC clone
-                        ├── Triggers binder pod (if needed)
-                        ├── Launches backup Job (worker)
-                        ├── Rsyncs data to remote storage
-                        ├── Cleans up Job, snapshot, PVC, and secrets
+BackupSchedule ──(one per cron tick)──► BackupRequest ──► VolumeSnapshot ──► temporary PVC (read-only)
+                                                                                   │
+                       Backup record ◄── result ◄── worker Job: plugin ──► restic snapshot ──► repository
 ```
 
----
+- **BackupSchedule** creates at most one **BackupRequest** per cron tick (no catch-up storms, no
+  overlapping runs by default).
+- The controller runs each request as a resumable state machine with bounded retries and
+  concurrency limits. Temporary objects are owned by the run and removed afterwards.
+- The **worker** has no Kubernetes API access. It runs the plugin, stores a restic snapshot, marks it
+  complete, applies retention and reports a summary.
+- A **Backup** record is written for every finished run (success or failure) *before* cleanup, with
+  the restic snapshot ID and sizes.
 
-## 🧾 Example: BackupRequest Custom Resource
+## Plugins
 
-```yaml
-apiVersion: backup.techmonkeys.se/v1
-kind: BackupRequest
-metadata:
-  name: home-assistant
-  namespace: backup-operator
-spec:
-  sourceNamespace: home-assistant
-  sourcePVC: home-assistant-home-assistant
-  snapshotClass: vsphere-csi-snapclass
-  storageClass: vsphere-csi
-  remotePath: backup@nas.example:/backups/home-assistant/
-  customScript:
-    preset: rsync-snapshot-default-backup-script
-    key: backup.sh
-```
+| Plugin | Use it for | Settings (`plugin.config`) |
+|---|---|---|
+| `files` | Volumes without their own backup: the whole volume or chosen paths | `paths`, `exclude` |
+| `archives` | Apps that write their own archives (Home Assistant, game servers, …) | `dir`, `pattern`, `newest`, `recursive`, `allowEmpty` |
+| `sqlite` | Apps with SQLite: consistent copies (WAL applied, integrity-checked) plus all other files | `pattern`, `includeOther`, `exclude` |
+| `custom` | Your own script from a ConfigMap in the app's namespace | see [examples/custom-plugin.yaml](examples/custom-plugin.yaml) |
 
----
+A snapshot is crash-consistent, not application-consistent. Prefer `archives` for apps that can
+export themselves, and `sqlite` for SQLite databases.
 
-## ⚙️ Environment Variables (Controller)
-
-| Variable | Description | Default |
-|-----------|--------------|----------|
-| `WORKER_IMAGE` | Image used for worker job | `ghcr.io/janip81/backup-operator-worker:latest` |
-| `SERVICE_ACCOUNT` | ServiceAccount for job execution | `backup-runner` |
-| `IMAGE_PULL_SECRET` | Secret for pulling private images | `ghcr-creds` |
-| `DEFAULT_STORAGE_CLASS` | Default StorageClass | `vsphere-csi` |
-| `MOUNT_PATH` | Mount path inside the worker | `/mnt/source` |
-| `OPERATOR_NAMESPACE` | Namespace where operator runs | `backup-operator` |
-
----
-
-## ⚙️ Environment Variables (Worker Job)
-
-| Variable | Description | Default |
-|-----------|--------------|----------|
-| `BACKUP_METHOD` | Always `snapshot` | `snapshot` |
-| `PVC_NAME` | Name of source PVC | — |
-| `SNAPSHOT_CLASS` | SnapshotClass used | — |
-| `TEMP_NAMESPACE` | Namespace of BackupRequest | — |
-| `REMOTE_PATH` | Remote rsync destination | — |
-| `SOURCE_PATH` | Path to data inside PVC | `/mnt/source/backups` |
-| `STORAGE_CLASS` | StorageClass for temporary PVC | `vsphere-csi` |
-| `MOUNT_PATH` | Mount path of PVC inside container | `/mnt/source` |
-| `SSH_KEY_PATH` | SSH private key path | `/tmp/ssh_key` |
-
----
-
-## 🧰 Cleanup Behavior
-
-> ⚠️ Cleanup is only reliable on the normal success path. When an unexpected error occurs (for example a
-> snapshot timeout or an API error), the handler records the failure and re-raises it **without cleaning up**,
-> and the retry starts again with new resource names. Temporary objects can therefore be left behind.
-> Being fixed in #8 and #10.
-
-On the normal path, the handler removes:
-
-- Snapshots after the job completes
-- Temporary PVCs and jobs
-- Copied secrets and ConfigMaps (these are shared per namespace; see #10)
-- and records the status on the BackupRequest CR
-
-Example logs:
-
-```
-[DONE] ✅ Backup home-assistant-20251010-182807 completed
-[INFO] Cleaning up resources in home-assistant...
-[INFO] Snapshot home-assistant-home-assistant-snap-20251010-182807 deleted
-```
-
----
-
-## 🧑‍💻 Development & Testing
-
-Run locally (for debug):
+## Quick start
 
 ```bash
-kopf run --standalone controller/__main__.py --verbose
+# 1. Install (CRDs, namespace, RBAC, controller). Monitoring is optional (Prometheus Operator).
+kubectl apply -k k8s/base
+kubectl apply -k k8s/monitoring
+
+# 2. Repository credentials in the app's namespace (see examples/credentials-secret.yaml)
+kubectl -n my-app create secret generic backup-repository \
+  --from-literal=RESTIC_PASSWORD=... --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+
+# 3. A schedule (see examples/)
+kubectl apply -f examples/schedule-files.yaml
+kubectl -n my-app get backupschedules       # READY must be True
+kubectl -n my-app get backups               # one record per finished run
 ```
 
-Deploy to a **disposable test cluster** in stages. Don't run `kubectl apply -f k8s/manifests/` on the whole
-directory: it also applies the example BackupRequests (`06-`, `07-`), which start backups immediately.
+With Argo CD, point an Application at `k8s/base` (and `k8s/monitoring`) at a release tag and pin the
+image in a kustomize overlay.
+
+## Restore
+
+Restores go into a new PVC with a one-off Job: [examples/restore-job.yaml](examples/restore-job.yaml).
+`latest` means the newest *complete* snapshot of that source in that namespace. Snapshot IDs are in
+the Backup records (`.status.artifact.shortId`). Details: [docs/operations.md](docs/operations.md).
+
+## Security
+
+- The operator only reads Secrets/ConfigMaps to validate them; it never copies credentials. The
+  worker mounts the app's credentials Secret as files; nothing secret goes into env vars, arguments,
+  logs, records or metrics.
+- Repository URLs can't carry credentials; plain HTTP is refused; SFTP requires `known_hosts`.
+- Worker pods: no service account token, read-only root filesystem, all capabilities dropped except
+  `DAC_READ_SEARCH` (to read any file on the snapshot copy). Set `worker.runAsUser` to run
+  non-root without capabilities where the data is readable by that user (Pod Security "restricted").
+  The default needs Pod Security "privileged" in the app's namespace.
+
+## Monitoring
+
+Metrics on `:8080/metrics` (`backup_operator_*`): last success/failure per source, runs and failed
+attempts by reason, durations, active runs, operator-owned snapshots, schedule readiness.
+`k8s/monitoring/prometheusrule.yaml` alerts on stale backups, failed runs, schedules that aren't
+ready, accumulating snapshots, stuck cleanup and a missing operator, and early on runaway behaviour
+(snapshot storms, piling-up requests, API errors, restarts) before it can load the cluster.
+`k8s/monitoring/grafana` is a Grafana dashboard ([docs/operations.md](docs/operations.md#dashboard)).
+
+## Configuration (controller environment)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WORKER_IMAGE` | `ghcr.io/janip81/backup-operator-worker:0.4.0` | Worker image (pin a release) |
+| `MAX_CONCURRENT_RUNS` | `1` | Active runs across the cluster |
+| `MAX_SNAPSHOTS_PER_PVC` | `1` | Operator-owned snapshots allowed per source PVC |
+| `DEFAULT_MAX_ATTEMPTS` | `3` | Attempts per request (override with `spec.maxAttempts`) |
+| `RETRY_BASE_SECONDS` / `RETRY_MAX_SECONDS` | `120` / `3600` | Backoff between attempts |
+| `API_QPS` / `API_BURST` | `5` / `10` | Client-side API rate limit |
+| `SNAPSHOT_TIMEOUT_SECONDS` / `JOB_TIMEOUT_SECONDS` | `900` / `7200` | Phase timeouts |
+| `SCHEDULE_STARTING_DEADLINE_SECONDS` | `3600` | Ticks later than this are skipped, not run late |
+| `DEFAULT_STORAGE_CLASS` | cluster default | StorageClass for the temporary PVC |
+| `WORKER_OUTPUT_LIMIT` / `WORKER_TMP_LIMIT` | `10Gi` / `2Gi` | Worker scratch space |
+| `INVENTORY_RESYNC_SECONDS` | `600` | Full relist behind the snapshot/request inventory metrics |
+
+## Development
 
 ```bash
-kubectl apply -f k8s/manifests/crds/
-kubectl apply -f k8s/manifests/00-namespace.yaml -f k8s/manifests/02-rbac.yaml \
-              -f k8s/manifests/03-configmap-scripts.yaml
-# create the image pull and SSH secrets yourself (see 01-ghcr-secret.sample.yaml)
-kubectl apply -f k8s/manifests/04-deployment.yaml      # starts the controller (replicas: 1)
-kubectl apply -f k8s/manifests/08-ServiceMonitor.yaml  # optional, needs Prometheus Operator
+make check          # ruff + pytest (container)
+make worker-test    # worker integration tests: real image, restic, restore + hash comparison
+make rules-test     # alert rule unit tests (promtool)
 ```
 
-Only create BackupRequests or BackupSchedules once the destination and the source PVC are verified.
-
----
-
-## 🧪 Version
-
-**v0.3.0** — see [CHANGELOG.md](CHANGELOG.md). v0.2.0 included:
-- Automatic handling of WaitForFirstConsumer PVCs
-- Non-root SSH key fix
-- Graceful error handling for deleted PVCs/snapshots/jobs
-- Prometheus metrics support
-- Functional baseline for production
-
----
-
-## 🧭 Next Steps / TODO (v0.3.0)
-
-Planned improvements for the next release:
-
-- [ ] 🧩 **Incremental backups** — track and upload only changed files between runs  
-- [ ] ♻️ **Automatic restore workflow** — ability to restore PVCs directly via `BackupRequest` CR  
-- [ ] 🔒 **Enhanced security** — restricted service account roles and scoped RBAC per namespace  
-- [ ] 💾 **Configurable retention policy** — `BackupSchedule.retention` is accepted but **not implemented yet** (#12)  
-- [ ] 📦 **Custom storage support** — add native support for MinIO, S3, or NFS targets  
-- [ ] 📊 **Expanded Prometheus metrics** — job durations, errors, and per-namespace stats  
-- [ ] ⚙️ **Operator configuration via ConfigMap** — allow dynamic runtime configuration without rebuilding the image  
-- [ ] 🐛 **More resilient cleanup** — handle stuck jobs, orphaned PVCs, or snapshot timeouts  
-- [ ] 🚀 **CI/CD automation** — auto-tag releases from GitHub Actions on version bumps  
-- [ ] 🧰 **Helm chart packaging** — make deployment and upgrades easier via Helm  
-- [ ] 🧱 **CRD refinements** — support for `spec.schedule`, custom backup methods, and restore validation
-
----
-
-💡 *Want to contribute?*  
-Check out [CONTRIBUTING.md](CONTRIBUTING.md) and open a feature branch with your proposal. Coding agents: see [AGENTS.md](AGENTS.md).
-
+See [CONTRIBUTING.md](CONTRIBUTING.md); coding agents: [AGENTS.md](AGENTS.md).
 
 © 2025 Jani Pesonen — TechMonkeys
