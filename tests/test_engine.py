@@ -518,6 +518,9 @@ def test_delayed_recording_keeps_transfer_completion_time(kube, adm):
     rec = kube.objs["backups"][("app", "r1")]["status"]
     assert engine.parse_ts(rec["completedAt"]) == transfer_done
     assert engine.parse_ts(rec["recordedAt"]) > transfer_done + timedelta(hours=4)
+    # the gauge comes from the record's watch event, which carries the transfer completion time
+    from controller.handlers import observability
+    observability.backup_event(event={"type": "ADDED"}, body=kube.objs["backups"][("app", "r1")])
     gauge = metrics.LAST_SUCCESS.labels(namespace="app", source="data")._value.get()
     assert gauge == transfer_done.timestamp()
 

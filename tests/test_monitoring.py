@@ -357,3 +357,37 @@ def test_dashboard_filters_every_query_by_cluster():
     for title, expr in _exprs():
         for m in re.finditer(r"\b(backup_operator_[a-z_]+|ALERTS|kube_[a-z_]+|container_[a-z_]+)\{([^}]*)\}", expr):
             assert 'k8s_cluster=~"$cluster"' in m.group(2), f"{title}: {m.group(0)}"
+
+
+
+def test_record_moving_to_an_older_time_or_other_phase_recomputes():
+    ev = observability.backup_event
+    ts = {d: datetime(2026, 11, d, 3, tzinfo=UTC).timestamp() for d in (10, 11, 12)}
+    ev(event={"type": "ADDED"}, body=_record("m1", "2026-11-10T03:00:00Z", ns="mv"))
+    ev(event={"type": "ADDED"}, body=_record("m2", "2026-11-12T03:00:00Z", ns="mv"))
+    ev(event={"type": "MODIFIED"}, body=_record("m2", "2026-11-11T03:00:00Z", ns="mv"))  # older time
+    assert _val(metrics.LAST_SUCCESS, namespace="mv", source="nightly") == ts[11]
+    ev(event={"type": "MODIFIED"}, body=_record("m2", "2026-11-11T03:00:00Z", phase="Failed", ns="mv"))
+    assert _val(metrics.LAST_SUCCESS, namespace="mv", source="nightly") == ts[10]
+    assert _val(metrics.LAST_FAILURE, namespace="mv", source="nightly") == ts[11]
+    ev(event={"type": "MODIFIED"}, body=_record("m2", "2026-11-10T03:00:00Z", phase="Failed", ns="mv"))
+    assert _val(metrics.LAST_FAILURE, namespace="mv", source="nightly") == ts[10]
+
+
+def test_concurrent_record_updates_and_deletes_end_consistent():
+    """Many threads adding and deleting records: the gauge always matches the surviving records."""
+    import threading
+    ev = observability.backup_event
+
+    def worker(i):
+        for j in range(200):
+            body = _record(f"c{i}-{j}", f"2026-11-{1 + (j % 28):02d}T03:00:00Z", ns="conc")
+            ev(event={"type": "ADDED"}, body=body)
+            ev(event={"type": "DELETED"}, body=body)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert _val(metrics.LAST_SUCCESS, namespace="conc", source="nightly") is None
