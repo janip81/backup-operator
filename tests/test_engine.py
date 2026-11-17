@@ -653,3 +653,17 @@ def test_records_follow_restic_retention(kube, adm):
     names = sorted(n for (_, n) in kube.objs["backups"])
     # old1's snapshot was pruned; other repositories and other source namespaces are out of scope
     assert names == ["old2", "other-ns", "other-repo", "r1"]
+
+
+def test_failed_job_message_names_the_worker_error_code(kube, adm):
+    """kubectl get backuprequests shows why the worker failed, not only BackoffLimitExceeded."""
+    kube.job_result = "Failed"
+    kube.termination_message = '{"error": "repository-password"}'
+    body = make_req(maxAttempts=1)
+    run([body], kube, adm, T0)
+    assert body["status"]["phase"] == "Failed"
+    assert "(repository-password)" in body["status"]["message"]
+    kube.termination_message = '{"error": "not a code; rm -rf"}'  # unsanitized text never reaches status
+    body2 = make_req(name="r2", uid="fedcba9876543210", maxAttempts=1)
+    run([body2], kube, adm, T0)
+    assert "rm -rf" not in body2["status"]["message"] and "()" not in body2["status"]["message"]

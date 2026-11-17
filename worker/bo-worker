@@ -63,13 +63,17 @@ setup_repository() {
       ;;
   esac
 
-  if ! restic "${RARGS[@]}" cat config >/dev/null 2>/tmp/restic-config.err; then
-    if [[ ${INIT_REPOSITORY:-true} == true ]] && grep -qiE 'not exist|no such file|unable to open config' /tmp/restic-config.err; then
+  local rc=0
+  restic "${RARGS[@]}" cat config >/dev/null 2>/tmp/restic-config.err || rc=$?
+  if (( rc == 12 )); then  # restic >= 0.17: wrong password or no matching key
+    fail repository-password "the repository password is wrong"
+  elif (( rc != 0 )); then
+    if [[ ${INIT_REPOSITORY:-true} == true ]] && { (( rc == 10 )) || grep -qiE 'not exist|no such file|unable to open config' /tmp/restic-config.err; }; then
       log "initializing new repository"
       restic "${RARGS[@]}" init >/dev/null || fail repository-init-failed "could not initialize the repository"
     else
       cat /tmp/restic-config.err >&2
-      fail repository-unavailable "repository is not reachable or the password is wrong"
+      fail repository-unavailable "repository is not reachable"
     fi
   fi
 }

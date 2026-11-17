@@ -370,7 +370,10 @@ def step_running(req: Req, kube, admission: Admission, now: datetime) -> dict | 
             return {"phase": "Recording", "phaseStartedAt": ts(now), "outcome": "succeeded", "completedAt": done,
                     "reason": "Recording", "message": "Worker job completed; recording the result"}
         if c.get("type") == "Failed":
-            raise AttemptFailed("JobFailed", f"Worker job failed: {c.get('reason')}: {c.get('message') or ''}")
+            # The worker's fixed error code (sanitized) says why, e.g. repository-password.
+            code = (_job_result(req, kube).get("artifact") or {}).get("error")
+            why = f" ({code})" if code else ""
+            raise AttemptFailed("JobFailed", f"Worker job failed{why}: {c.get('reason')}: {c.get('message') or ''}")
     if _phase_timed_out(req, now, cfg.JOB_TIMEOUT + 300):
         raise AttemptFailed("JobTimeout", f"Worker job did not finish within {cfg.JOB_TIMEOUT}s")
     return None

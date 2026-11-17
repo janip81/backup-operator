@@ -204,7 +204,8 @@ printf 'Zq9-not-the-password-7Xv' > "$tmp/creds/RESTIC_PASSWORD"
 out=$(worker "$src2" -- backup 2>&1) && die "wrong password accepted"
 printf 'correct horse battery staple' > "$tmp/creds/RESTIC_PASSWORD"
 if grep -q "Zq9-not-the-password-7Xv\|correct horse" <<< "$out$(msg)"; then die "password leaked into output"; fi
-ok "wrong password fails without printing the password"
+[[ $(msg | jq -r .error) == repository-password ]] || die "wrong password reported as $(msg)"
+ok "wrong password fails with its own error code, without printing the password"
 
 # termination messages carry only fixed error codes, never tool output
 [[ $(msg | jq -c 'keys') == '["error"]' && $(msg | jq -r .error) =~ ^[a-z-]+$ ]] || die "termination message: $(msg)"
