@@ -7,6 +7,8 @@ metadata:
 spec:
   schedule: "15 2 * * *"
   timeZone: Europe/Stockholm
+  # Pause while the app is scaled to 0 (no pod uses the volume); resume when it runs again.
+  # whenSourceUnused: Skip
   template:
     sourcePVC: my-app-data
     snapshotClass: csi-snapclass

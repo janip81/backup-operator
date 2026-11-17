@@ -131,12 +131,17 @@ panels += place([
         (f"max by (namespace, source) (time() - backup_operator_last_failure_timestamp_seconds{{{NS}}})",
          "Last failure"),
         (f"max by (namespace, source) (backup_operator_schedule_interval_seconds{{{NS}}})", "Interval"),
+        (f"max by (namespace, source) (backup_operator_schedule_paused{{{NS}}})", "Paused"),
     ], w=12, desc="Ready: source volume, credentials and repository settings are valid. Times are ages.",
         overrides=[
             {"matcher": {"id": "byName", "options": "Ready"}, "properties": [
                 {"id": "mappings", "value": [{"type": "value", "options": {
                     "1": {"text": "Ready", "color": "green"}, "0": {"text": "Not ready", "color": "red"}}}]},
                 {"id": "custom.cellOptions", "value": {"type": "color-background"}}]},
+            {"matcher": {"id": "byName", "options": "Paused"}, "properties": [
+                {"id": "mappings", "value": [{"type": "value", "options": {
+                    "1": {"text": "Paused (unused)", "color": "blue"}, "0": {"text": "Active", "color": "green"}}}]},
+                {"id": "custom.cellOptions", "value": {"type": "color-text"}}]},
             *[{"matcher": {"id": "byName", "options": n}, "properties": [{"id": "unit", "value": "s"}]}
               for n in ("Last success", "Last failure", "Interval")]]),
 ], 8)

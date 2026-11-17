@@ -28,6 +28,15 @@
 
 Repeat the restore check after changing plugins, repositories or retention, and periodically.
 
+## Apps that are often stopped
+
+Set `whenSourceUnused: Skip` on the schedule. At each tick the operator checks whether a pod (running
+or starting) mounts the source PVC. If none does, for example a game server scaled to 0, the tick is
+skipped: `PHASE Paused`, `status.lastSkipped.reason: SourceUnused`, and staleness alerts don't fire.
+The first tick after a pod uses the volume again runs normally. Changes made between the last backup
+and the scale-down are not captured; start a one-off BackupRequest before scaling down if you need
+them. `suspend: true` remains the manual pause.
+
 ## When something goes wrong
 
 | Symptom | Where to look |

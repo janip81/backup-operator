@@ -123,9 +123,15 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
     elif ready_cond:
         metrics.SCHEDULE_READY.labels(namespace=src_ns, source=name).set(1 if ready_cond["status"] == "True" else 0)
 
-    phase = "Suspended" if spec.get("suspend") else "Active"
+    # Paused (whenSourceUnused: Skip) holds between ticks; only a tick decision changes it. Leaving Skip
+    # clears it at once, so a schedule is never reported paused (and its staleness alert suppressed)
+    # under a policy that can't pause.
+    skip_policy = (spec.get("whenSourceUnused") or "Run") == "Skip"
+    paused = skip_policy and status.get("phase") == "Paused"
+    phase = "Suspended" if spec.get("suspend") else "Paused" if paused else "Active"
     if status.get("phase") != phase:
         patch["phase"] = phase
+    metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(1 if phase == "Paused" else 0)
     upcoming = ts(next_tick(spec, now))
     created = parse_ts(md.get("creationTimestamp")) or now
     last = parse_ts(status.get("lastScheduleTime")) or created  # no run for ticks before creation
@@ -138,6 +144,15 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
 
     # A tick is due: decide once, then record lastScheduleTime so it is never re-evaluated.
     patch.update({"lastScheduleTime": ts(tick), "nextScheduleTime": upcoming})
+    # whenSourceUnused: Skip -- decided first on every due tick, before any other early return
+    # (deadline, Forbid, validation, retries), so the phase always reflects the current pod state.
+    if skip_policy:
+        in_use = source_in_use(kube, src_ns, (spec.get("template") or {}).get("sourcePVC") or "")
+        patch["phase"] = "Suspended" if spec.get("suspend") else "Active" if in_use else "Paused"
+        metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(0 if in_use else 1)
+        if not in_use:
+            return {**patch, "lastSkipped": {"time": ts(tick), "reason": "SourceUnused"},
+                    "message": f"Paused at {ts(tick)}: no pod uses the source PVC"}
     deadline = int(spec.get("startingDeadlineSeconds") or cfg.SCHEDULE_STARTING_DEADLINE)
     if (now - tick).total_seconds() > deadline:
         return {**patch, "lastSkipped": {"time": ts(tick), "reason": "MissedDeadline"},
@@ -168,6 +183,17 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
         raise TransientApiError(f"BackupRequest {req_name} exists but does not belong to this schedule")
     _prune_history(kube, ns, spec, owned, keep_name=req_name)
     return {**patch, "lastRequest": req_name, "message": f"Created {req_name} for {ts(tick)}", "lastSkipped": None}
+
+
+def source_in_use(kube, ns: str, pvc: str) -> bool:
+    """True if a pod that hasn't finished mounts the PVC (Pending counts: it is about to use it)."""
+    for pod in kube.list_pods(ns):
+        if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+            continue
+        for vol in (pod.get("spec") or {}).get("volumes") or []:
+            if (vol.get("persistentVolumeClaim") or {}).get("claimName") == pvc:
+                return True
+    return False
 
 
 def _src_ns(spec: dict, ns: str) -> str:

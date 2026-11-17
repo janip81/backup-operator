@@ -135,6 +135,10 @@ class Kube:
         res = self._call(self.core.list_namespaced_pod, ns, label_selector=f"job-name={job}")
         return self._dict(res).get("items", []) if res else []
 
+    def list_pods(self, ns: str) -> list[dict]:
+        res = self._call(self.core.list_namespaced_pod, ns)
+        return self._dict(res).get("items", []) if res else []
+
     def get_secret(self, ns: str, name: str) -> dict | None:
         return self._dict(self._call(self.core.read_namespaced_secret, name, ns, ok_status=(404,)))
 
