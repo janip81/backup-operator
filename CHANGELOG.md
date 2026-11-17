@@ -18,6 +18,8 @@ Reliability and security rework (issues #8–#15) and a new storage model: resti
 - Schedule validation with a Ready condition, history limits, time zones, catch-up and overlap
   policies (#9, #15)
 - kustomize base and monitoring component (#15)
+- Runaway guards: metrics and alerts for snapshot storms, piling-up requests, API errors and
+  restarts; Grafana dashboard (`k8s/monitoring/grafana`) (#11)
 
 #### Changed
 - Controller: resumable state machine with persisted attempts, backoff, admission limits and API rate

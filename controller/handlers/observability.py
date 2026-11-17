@@ -28,8 +28,38 @@ def backup_event(event, body, **_):
     metrics.observe_result(ns, source, status.get("phase") or "", completed)
 
 
-@kopf.on.event("snapshot.storage.k8s.io", "v1", "volumesnapshots",
-               labels={"app.kubernetes.io/managed-by": "backup-operator"})
+# All VolumeSnapshots, not only the operator's: leftovers without our labels (older versions, manual
+# runs) must still show up in the inventory and alerts.
+@kopf.on.event("snapshot.storage.k8s.io", "v1", "volumesnapshots")
 def snapshot_event(event, body, **_):
     md = body["metadata"]
-    metrics.snapshot_event(md["namespace"], md["name"], exists=event.get("type") != "DELETED")
+    pvc = ((body.get("spec") or {}).get("source") or {}).get("persistentVolumeClaimName") or "(pre-provisioned)"
+    owned = (md.get("labels") or {}).get("app.kubernetes.io/managed-by") == "backup-operator"
+    metrics.snapshot_event(md["namespace"], md["name"], pvc=pvc, owned=owned,
+                           created=_epoch(md.get("creationTimestamp")) or 0.0,
+                           deleting=_epoch(md.get("deletionTimestamp")),
+                           exists=event.get("type") != "DELETED")
+
+
+@kopf.on.event("snapshot.storage.k8s.io", "v1", "volumesnapshotcontents")
+def snapshot_content_event(event, body, **_):
+    md = body["metadata"]
+    ref = (body.get("spec") or {}).get("volumeSnapshotRef") or {}
+    metrics.content_event(md["name"], f"{ref.get('namespace')}/{ref.get('name')}",
+                          created=_epoch(md.get("creationTimestamp")) or 0.0,
+                          exists=event.get("type") != "DELETED")
+
+
+@kopf.on.event(cfg.GROUP, cfg.VERSION, "backuprequests")
+def request_event(event, body, **_):
+    """Counts every request, including v0.3 ones the controller no longer handles, so a pile-up shows."""
+    md = body["metadata"]
+    key = f"{md['namespace']}/{md['name']}"
+    if event.get("type") == "DELETED":
+        metrics.request_event(key, None)
+        return
+    if "repository" not in (body.get("spec") or {}):
+        phase = "Legacy"
+    else:
+        phase = (body.get("status") or {}).get("phase") or "Pending"
+    metrics.request_event(key, phase, created=_epoch(md.get("creationTimestamp")) or 0.0)

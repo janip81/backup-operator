@@ -11,7 +11,7 @@ CONTROLLER_IMG  := $(IMAGE_BASE)-controller
 WORKER_IMG      := $(IMAGE_BASE)-worker
 PY_IMAGE        := python:3.13-slim
 
-.PHONY: all build build-controller build-worker push guard-tag lint test check fix rules-test worker-test clean run-operator
+.PHONY: all build build-controller build-worker push guard-tag lint test check fix rules-test worker-test clean run-operator dashboard
 
 all: build
 
@@ -38,6 +38,10 @@ check:
 	  "pip install -q --user --no-warn-script-location -r requirements-dev.txt && ~/.local/bin/ruff check --no-cache . && python -m pytest -q -p no:cacheprovider -o faulthandler_timeout=60"
 
 lint test: check
+
+# Regenerate the Grafana dashboard JSON from hack/gen-dashboard.py.
+dashboard:
+	python3 hack/gen-dashboard.py
 
 # Worker integration tests: real worker image, local restic repository, restore + hash comparison.
 worker-test: build-worker

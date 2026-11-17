@@ -14,6 +14,7 @@ from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
 from . import config as cfg
+from . import metrics
 
 SNAP_GROUP, SNAP_VERSION, SNAP_PLURAL = "snapshot.storage.k8s.io", "v1", "volumesnapshots"
 
@@ -61,15 +62,18 @@ class Kube:
     # --- error handling ---
     def _call(self, fn, *args, ok_status: tuple[int, ...] = (), **kwargs) -> Any:
         self.limiter.acquire()
+        metrics.API_CALLS.inc()
         try:
             return fn(*args, _request_timeout=self.timeout, **kwargs)
         except ApiException as e:
             if e.status in ok_status:
                 return None
+            metrics.API_ERRORS.labels(code=str(e.status)).inc()
             if e.status in (400, 403, 422):
                 raise  # permanent: caller decides
             raise TransientApiError(f"{fn.__name__}: HTTP {e.status} {e.reason}") from e
         except Exception as e:  # urllib3 timeouts, connection errors
+            metrics.API_ERRORS.labels(code="network").inc()
             raise TransientApiError(f"{fn.__name__}: {type(e).__name__}: {e}") from e
 
     @staticmethod

@@ -312,6 +312,7 @@ def step_snapshotting(req: Req, kube, admission: Admission, now: datetime) -> di
     snap = _require_owned(req, kube.get_snapshot(req.src_ns, n["snapshot"]), "VolumeSnapshot", n["snapshot"])
     if snap is None:
         kube.create_snapshot(req.src_ns, jobspec.snapshot(req, n))
+        metrics.SNAPSHOTS_CREATED.labels(namespace=req.src_ns, pvc=req.src_pvc).inc()
         return None
     st = snap.get("status") or {}
     err = (st.get("error") or {}).get("message") or ""

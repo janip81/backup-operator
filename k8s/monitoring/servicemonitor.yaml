@@ -12,3 +12,6 @@ spec:
   - port: metrics
     path: /metrics
     interval: 30s
+    # Keep the metrics' own namespace label (the backed-up app's namespace) instead of replacing it
+    # with the operator's namespace; the alerts and the dashboard group by it.
+    honorLabels: true

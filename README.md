@@ -94,7 +94,9 @@ the Backup records (`.status.artifact.shortId`). Details: [docs/operations.md](d
 Metrics on `:8080/metrics` (`backup_operator_*`): last success/failure per source, runs and failed
 attempts by reason, durations, active runs, operator-owned snapshots, schedule readiness.
 `k8s/monitoring/prometheusrule.yaml` alerts on stale backups, failed runs, schedules that aren't
-ready, accumulating snapshots, stuck cleanup and a missing operator.
+ready, accumulating snapshots, stuck cleanup and a missing operator, and early on runaway behaviour
+(snapshot storms, piling-up requests, API errors, restarts) before it can load the cluster.
+`k8s/monitoring/grafana` is a Grafana dashboard ([docs/operations.md](docs/operations.md#dashboard)).
 
 ## Configuration (controller environment)
 

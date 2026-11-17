@@ -53,7 +53,9 @@ def test_operator_rbac_is_least_privilege():
             by_resource.setdefault(res, set()).update(r["verbs"])
     assert by_resource["secrets"] == {"get"} and by_resource["configmaps"] == {"get"}
     assert by_resource["pods"] == {"get", "list"} and "pods/log" not in by_resource
-    for forbidden in ("roles", "rolebindings", "serviceaccounts", "volumesnapshotcontents", "*"):
+    # Contents are cluster-scoped and map to backend snapshots: read-only inventory, never modified.
+    assert by_resource["volumesnapshotcontents"] == {"list", "watch"}
+    for forbidden in ("roles", "rolebindings", "serviceaccounts", "*"):
         assert forbidden not in by_resource
     assert not any("*" in r["verbs"] or "update" in r["verbs"] for r in rules)
 
