@@ -671,3 +671,22 @@ def test_failed_job_message_names_the_worker_error_code(kube, adm):
     body2 = make_req(name="r2", uid="fedcba9876543210", maxAttempts=1)
     run([body2], kube, adm, T0)
     assert "rm -rf" not in body2["status"]["message"] and "()" not in body2["status"]["message"]
+
+
+def test_temporary_pvc_uses_the_source_storage_class(kube, adm, monkeypatch):
+    """Clusters without a default StorageClass: the clone takes the source PVC's class unless the run or
+    DEFAULT_STORAGE_CLASS names one."""
+    monkeypatch.setattr(cfg, "DEFAULT_STORAGE", "")
+    kube.objs["pvc"][("app", "data")]["spec"]["storageClassName"] = "fast-csi"
+    seen = []
+    orig = kube.create_pvc
+    kube.create_pvc = lambda ns, body: (seen.append(body["spec"].get("storageClassName")), orig(ns, body))[1]
+    run([make_req()], kube, adm, T0)
+    assert seen and seen[0] == "fast-csi"
+    seen.clear()
+    monkeypatch.setattr(cfg, "DEFAULT_STORAGE", "default-sc")
+    run([make_req(name="r2", uid="feedbeeffeedbeef")], kube, adm, T0)
+    assert seen and seen[0] == "default-sc"
+    seen.clear()
+    run([make_req(name="r3", uid="abcdabcdabcdabcd", storageClass="explicit")], kube, adm, T0)
+    assert seen and seen[0] == "explicit"

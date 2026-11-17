@@ -333,13 +333,12 @@ def step_cloning(req: Req, kube, admission: Admission, now: datetime) -> dict | 
     n = req.names()
     pvc = _require_owned(req, kube.get_pvc(req.src_ns, n["pvc"]), "PersistentVolumeClaim", n["pvc"])
     if pvc is None:
-        size = req.status.get("restoreSize")
-        if not size:
-            src = kube.get_pvc(req.src_ns, req.src_pvc) or {}
-            size = (((src.get("spec") or {}).get("resources") or {}).get("requests") or {}).get("storage")
+        src = kube.get_pvc(req.src_ns, req.src_pvc) or {}
+        size = req.status.get("restoreSize") \
+            or (((src.get("spec") or {}).get("resources") or {}).get("requests") or {}).get("storage")
         if not size:
             raise AttemptFailed("CloneError", "Could not determine the size for the temporary PVC")
-        kube.create_pvc(req.src_ns, jobspec.clone_pvc(req, n, size))
+        kube.create_pvc(req.src_ns, jobspec.clone_pvc(req, n, size, src))
         return None
     if (pvc.get("status") or {}).get("phase") == "Bound" or _waits_for_consumer(kube, pvc):
         return {"phase": "Running", "phaseStartedAt": ts(now), "reason": "Running",

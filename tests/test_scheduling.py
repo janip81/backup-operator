@@ -245,3 +245,13 @@ def test_insecure_allowed_and_complete_sftp_secret_are_ready(kube):
     s2["spec"]["template"]["repository"] = {"url": "sftp:backup@nas.example:/srv/r", "credentialsSecret": "sftp"}
     apply(s2, scheduling.reconcile_schedule(s2, kube, CREATED + timedelta(minutes=1)))
     assert s2["status"]["conditions"][0]["status"] == "True"
+
+
+def test_missing_storage_class_makes_schedule_not_ready(kube):
+    """A named StorageClass that doesn't exist would leave every temporary PVC Pending until timeout."""
+    kube.missing_storage_classes.add("gone")
+    s = schedule()
+    s["spec"]["template"]["storageClass"] = "gone"
+    apply(s, scheduling.reconcile_schedule(s, kube, CREATED + timedelta(minutes=1)))
+    cond = s["status"]["conditions"][0]
+    assert cond["status"] == "False" and cond["reason"] == "StorageClassNotFound"

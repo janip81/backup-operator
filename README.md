@@ -110,7 +110,7 @@ ready, accumulating snapshots, stuck cleanup and a missing operator, and early o
 | `API_QPS` / `API_BURST` | `5` / `10` | Client-side API rate limit |
 | `SNAPSHOT_TIMEOUT_SECONDS` / `JOB_TIMEOUT_SECONDS` | `900` / `7200` | Phase timeouts |
 | `SCHEDULE_STARTING_DEADLINE_SECONDS` | `3600` | Ticks later than this are skipped, not run late |
-| `DEFAULT_STORAGE_CLASS` | cluster default | StorageClass for the temporary PVC |
+| `DEFAULT_STORAGE_CLASS` | the source PVC's class | StorageClass for the temporary PVC (a run's `storageClass` wins) |
 | `WORKER_OUTPUT_LIMIT` / `WORKER_TMP_LIMIT` | `10Gi` / `2Gi` | Worker scratch space |
 | `INVENTORY_RESYNC_SECONDS` | `600` | Full relist behind the snapshot/request inventory metrics |
 

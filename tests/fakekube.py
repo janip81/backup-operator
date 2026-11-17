@@ -18,6 +18,7 @@ class FakeKube:
         self.snapshot_error: str | None = None
         self.job_result = "Complete"  # Complete | Failed | None (keeps running)
         self.wffc = False
+        self.missing_storage_classes: set[str] = set()
         self.hooks = {}  # method name -> callable(*args) that may raise
         self.termination_message = '{"snapshotId": "abc12345", "filesNew": 3}'
         self.cms = {("app", "my-plugin"): {"data": {"plugin.sh": "echo hi"}}}
@@ -95,6 +96,8 @@ class FakeKube:
 
     def get_storage_class(self, name):
         self._tick()
+        if name in self.missing_storage_classes:
+            return None
         return {"volumeBindingMode": "WaitForFirstConsumer" if self.wffc else "Immediate"}
 
     def get_snapshot(self, ns, name):

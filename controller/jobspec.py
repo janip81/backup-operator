@@ -26,13 +26,21 @@ def snapshot(req, n: dict) -> dict:
     }
 
 
-def clone_pvc(req, n: dict, size: str) -> dict:
+def clone_storage_class(spec: dict, source_pvc: dict | None) -> str:
+    """StorageClass for the temporary PVC: the run's storageClass, else DEFAULT_STORAGE_CLASS, else the
+    source PVC's own class (the snapshot can only be restored by the same CSI driver). Empty means the
+    cluster default, which not every cluster has."""
+    return (spec.get("storageClass") or cfg.DEFAULT_STORAGE
+            or ((source_pvc or {}).get("spec") or {}).get("storageClassName") or "")
+
+
+def clone_pvc(req, n: dict, size: str, source_pvc: dict | None = None) -> dict:
     spec = {
         "dataSource": {"name": n["snapshot"], "kind": "VolumeSnapshot", "apiGroup": "snapshot.storage.k8s.io"},
         "accessModes": ["ReadWriteOnce"],
         "resources": {"requests": {"storage": size}},
     }
-    storage_class = req.spec.get("storageClass") or cfg.DEFAULT_STORAGE
+    storage_class = clone_storage_class(req.spec, source_pvc)
     if storage_class:
         spec["storageClassName"] = storage_class
     return {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": _meta(req, n["pvc"]), "spec": spec}
