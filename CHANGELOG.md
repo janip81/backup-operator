@@ -37,6 +37,9 @@ Reliability and security rework (issues #8–#15) and a new storage model: resti
 - The temporary PVC defaults to the source PVC's StorageClass (clusters without a default class
   left it Pending until the clone timeout); a schedule naming a missing StorageClass is not Ready
 
+- `whenSourceUnused: Skip` on schedules: pause while no pod uses the source PVC, after one backup of
+  the stopped volume; `Paused` phase, `backup_operator_schedule_paused` metric, no staleness alerts (#23)
+
 #### Removed
 - rsync/scp transfer, script presets, per-namespace RBAC and secret copying
 

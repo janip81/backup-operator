@@ -28,6 +28,14 @@
 
 Repeat the restore check after changing plugins, repositories or retention, and periodically.
 
+## Apps that are often stopped
+
+Set `whenSourceUnused: Skip` on the schedule. While no pod uses the source PVC (for example a game
+server scaled to 0), the schedule takes one more backup of the stopped volume, then shows
+`PHASE Paused` and skips ticks (`status.lastSkipped.reason: SourceUnused`). Staleness alerts don't fire
+while paused. The next tick after a pod uses the volume again runs normally. If that final backup
+fails, the schedule keeps trying at each tick. `suspend: true` remains the manual pause.
+
 ## When something goes wrong
 
 | Symptom | Where to look |

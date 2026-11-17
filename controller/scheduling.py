@@ -123,9 +123,11 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
     elif ready_cond:
         metrics.SCHEDULE_READY.labels(namespace=src_ns, source=name).set(1 if ready_cond["status"] == "True" else 0)
 
-    phase = "Suspended" if spec.get("suspend") else "Active"
+    # Paused (whenSourceUnused: Skip) holds between ticks; only a tick decision changes it.
+    phase = "Suspended" if spec.get("suspend") else "Paused" if status.get("phase") == "Paused" else "Active"
     if status.get("phase") != phase:
         patch["phase"] = phase
+    metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(1 if phase == "Paused" else 0)
     upcoming = ts(next_tick(spec, now))
     created = parse_ts(md.get("creationTimestamp")) or now
     last = parse_ts(status.get("lastScheduleTime")) or created  # no run for ticks before creation
@@ -162,12 +164,49 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
         if not ok:
             return {**patch, "lastSkipped": {"time": ts(tick), "reason": reason},
                     "message": f"Skipped {ts(tick)}: {message}"}
+        pause = _pause_decision(spec, status, kube, src_ns, owned, tick)
+        if pause is not None:
+            patch.update(pause)
+            if pause.get("phase") == "Paused":
+                metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(1)
+                return {**patch, "lastSkipped": {"time": ts(tick), "reason": "SourceUnused"},
+                        "message": f"Paused at {ts(tick)}: no pod uses the source PVC and a backup of it exists"}
+            metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(0)
         kube.create_cr("backuprequests", ns, _request(body, req_name, tick))
         existing = kube.get_cr("backuprequests", ns, req_name)
     if ((existing or {}).get("metadata") or {}).get("labels", {}).get(SCHEDULE_UID_LABEL) != uid:
         raise TransientApiError(f"BackupRequest {req_name} exists but does not belong to this schedule")
     _prune_history(kube, ns, spec, owned, keep_name=req_name)
     return {**patch, "lastRequest": req_name, "message": f"Created {req_name} for {ts(tick)}", "lastSkipped": None}
+
+
+def source_in_use(kube, ns: str, pvc: str) -> bool:
+    """True if a pod that hasn't finished mounts the PVC (Pending counts: it is about to use it)."""
+    for pod in kube.list_pods(ns):
+        if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+            continue
+        for vol in (pod.get("spec") or {}).get("volumes") or []:
+            if (vol.get("persistentVolumeClaim") or {}).get("claimName") == pvc:
+                return True
+    return False
+
+
+def _pause_decision(spec: dict, status: dict, kube, src_ns: str, owned: list[dict],
+                    tick: datetime) -> dict | None:
+    """whenSourceUnused: Skip. While a pod uses the source: run and forget when it became unused. Once
+    unused: remember the first such tick and keep running until a backup started at or after it has
+    succeeded (the app's final state), then pause. Returns a status patch, or None for whenSourceUnused: Run."""
+    if (spec.get("whenSourceUnused") or "Run") != "Skip":
+        return None
+    pvc = (spec.get("template") or {}).get("sourcePVC") or ""
+    if source_in_use(kube, src_ns, pvc):
+        return {"sourceUnusedSince": None, "phase": "Active"}
+    since = parse_ts(status.get("sourceUnusedSince")) or tick
+    starts = [parse_ts((r.get("status") or {}).get("startedAt")) for r in owned
+              if (r.get("status") or {}).get("phase") == "Succeeded"]
+    newest = max((t for t in starts if t), default=None)
+    paused = newest is not None and newest >= since
+    return {"sourceUnusedSince": ts(since), "phase": "Paused" if paused else "Active"}
 
 
 def _src_ns(spec: dict, ns: str) -> str:

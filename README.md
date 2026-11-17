@@ -33,6 +33,8 @@ BackupSchedule ──(one per cron tick)──► BackupRequest ──► Volume
 
 - **BackupSchedule** creates at most one **BackupRequest** per cron tick (no catch-up storms, no
   overlapping runs by default).
+  With `whenSourceUnused: Skip` it pauses while no pod uses the volume (an app scaled to 0), after
+  one backup of the stopped app has succeeded, and resumes when a pod uses the volume again.
 - The controller runs each request as a resumable state machine with bounded retries and
   concurrency limits. Temporary objects are owned by the run and removed afterwards.
 - The **worker** has no Kubernetes API access. It runs the plugin, stores a restic snapshot, marks it

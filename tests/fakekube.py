@@ -19,6 +19,7 @@ class FakeKube:
         self.job_result = "Complete"  # Complete | Failed | None (keeps running)
         self.wffc = False
         self.missing_storage_classes: set[str] = set()
+        self.pods: dict[str, list[dict]] = {}  # namespace -> app pods (for whenSourceUnused)
         self.hooks = {}  # method name -> callable(*args) that may raise
         self.termination_message = '{"snapshotId": "abc12345", "filesNew": 3}'
         self.cms = {("app", "my-plugin"): {"data": {"plugin.sh": "echo hi"}}}
@@ -74,6 +75,10 @@ class FakeKube:
             if self.job_result and not (o.get("status") or {}).get("conditions"):
                 o["status"] = {"conditions": [{"type": self.job_result, "status": "True", "reason": "x"}],
                                "completionTime": "2026-11-17T03:01:00Z" if self.job_result == "Complete" else None}
+
+    def list_pods(self, ns):
+        self._tick()
+        return list(self.pods.get(ns, []))
 
     def list_job_pods(self, ns, job):
         self._tick()

@@ -60,7 +60,7 @@ tests:
           - exp_labels: {severity: warning, namespace: app, source: nightly}
             exp_annotations:
               summary: "No successful backup for app/nightly"
-              description: The newest successful backup is older than 1.5x the schedule interval.
+              description: The newest successful backup is older than 1.5x the schedule interval. Schedules paused because their volume is unused (whenSourceUnused Skip) don't alert.
 
   - name: operator down
     interval: 1m
@@ -316,3 +316,17 @@ tests:
             exp_annotations:
               summary: The backup operator is denied Kubernetes API access
               description: Persistent 403 errors mean the ClusterRole doesn't match the controller version. Re-apply k8s/base.
+
+  - name: a paused schedule doesn't go stale
+    interval: 1h
+    input_series:
+      - series: 'backup_operator_last_success_timestamp_seconds{namespace="app",source="game"}'
+        values: '0x100'
+      - series: 'backup_operator_schedule_interval_seconds{namespace="app",source="game"}'
+        values: '86400x100'
+      - series: 'backup_operator_schedule_paused{namespace="app",source="game"}'
+        values: '1x100'
+    alert_rule_test:
+      - eval_time: 3d
+        alertname: BackupStale
+        exp_alerts: []

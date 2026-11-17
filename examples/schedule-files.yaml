@@ -7,6 +7,8 @@ metadata:
 spec:
   schedule: "15 2 * * *"
   timeZone: Europe/Stockholm
+  # Pause while the app is scaled to 0 (after one backup of the stopped volume); resume when it runs.
+  # whenSourceUnused: Skip
   template:
     sourcePVC: my-app-data
     snapshotClass: csi-snapclass
