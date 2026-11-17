@@ -7,7 +7,7 @@ metadata:
 spec:
   schedule: "15 2 * * *"
   timeZone: Europe/Stockholm
-  # Pause while the app is scaled to 0 (after one backup of the stopped volume); resume when it runs.
+  # Pause while the app is scaled to 0 (no pod uses the volume); resume when it runs again.
   # whenSourceUnused: Skip
   template:
     sourcePVC: my-app-data

@@ -48,8 +48,8 @@ spec:
                 type: string
                 enum: [Run, Skip]
                 default: Run
-                description: Skip pauses the schedule while no pod uses the source PVC, after one backup of the
-                  unused volume has succeeded (the app's final state). Run backs up at every tick.
+                description: Skip pauses the schedule (no runs, phase Paused) while no pod uses the source PVC, e.g.
+                  an app scaled to 0. Run backs up at every tick.
 
               concurrencyPolicy:
                 type: string
@@ -196,9 +196,6 @@ spec:
                 - Active
                 - Suspended
                 - Paused
-              sourceUnusedSince:
-                type: string
-                description: First tick at which no pod used the source PVC (whenSourceUnused Skip).
 
               lastScheduleTime:
                 type: string

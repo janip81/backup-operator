@@ -257,6 +257,7 @@ def test_missing_storage_class_makes_schedule_not_ready(kube):
     assert cond["status"] == "False" and cond["reason"] == "StorageClassNotFound"
 
 
+
 # --- whenSourceUnused: Skip (#23) ---
 
 def _app_pod(pvc="data", phase="Running"):
@@ -264,133 +265,89 @@ def _app_pod(pvc="data", phase="Running"):
             "spec": {"volumes": [{"name": "d", "persistentVolumeClaim": {"claimName": pvc}}]}}
 
 
-def _finish_requests(kube, phase="Succeeded", started=None):
-    for (_, _), r in kube.objs["backuprequests"].items():
-        st = r.setdefault("status", {})
-        if not st.get("phase"):
-            st["phase"] = phase
-            st["startedAt"] = ts(started or parse(r["metadata"]["annotations"]))
+def _tick(s, kube, day, hour=3, minute=1):
+    apply(s, scheduling.reconcile_schedule(s, kube, datetime(2026, 11, day, hour, minute, tzinfo=UTC)))
 
 
-def parse(annotations):
-    from controller.engine import parse_ts
-    return parse_ts(next(iter(annotations.values())))
+def _finish(kube):
+    for r in kube.objs["backuprequests"].values():
+        r.setdefault("status", {}).setdefault("phase", "Succeeded")
 
 
-def _tick(s, kube, day):
-    """Reconcile shortly after the 03:00 tick of the given day."""
-    apply(s, scheduling.reconcile_schedule(s, kube, datetime(2026, 11, day, 3, 1, tzinfo=UTC)))
-
-
-def test_unused_source_backs_up_final_state_then_pauses_and_resumes(kube):
+def _paused(name="nightly", ns="app"):
     from controller import metrics
+    return metrics.SCHEDULE_PAUSED.labels(namespace=ns, source=name)._value.get()
+
+
+def test_skip_pauses_while_unused_and_resumes(kube):
     s = schedule(whenSourceUnused="Skip")
     kube.pods["app"] = [_app_pod()]
-    _tick(s, kube, 17)                       # app running: normal run
-    assert len(requests(kube)) == 1 and s["status"]["phase"] == "Active"
-    assert "sourceUnusedSince" not in s["status"]
-    _finish_requests(kube)
-
-    kube.pods["app"] = []                    # app scaled to 0
-    _tick(s, kube, 18)                       # one more run captures the final state
-    assert len(requests(kube)) == 2 and s["status"]["phase"] == "Active"
-    assert s["status"]["sourceUnusedSince"] == ts(datetime(2026, 11, 18, 3, tzinfo=UTC))
-    _finish_requests(kube)
-
-    _tick(s, kube, 19)                       # unused and backed up: paused
-    assert len(requests(kube)) == 2
+    _tick(s, kube, 17)
+    assert len(requests(kube)) == 1 and s["status"]["phase"] == "Active" and _paused() == 0
+    kube.pods["app"] = []                                   # app scaled to 0
+    _tick(s, kube, 18)
+    assert len(requests(kube)) == 1
     assert s["status"]["phase"] == "Paused" and s["status"]["lastSkipped"]["reason"] == "SourceUnused"
-    assert metrics.SCHEDULE_PAUSED.labels(namespace="app", source="nightly")._value.get() == 1
-    _tick(s, kube, 20)
-    assert len(requests(kube)) == 2 and s["status"]["phase"] == "Paused"
-
-    kube.pods["app"] = [_app_pod(phase="Pending")]   # app starting again
-    _tick(s, kube, 21)
-    assert len(requests(kube)) == 3 and s["status"]["phase"] == "Active"
-    assert "sourceUnusedSince" not in s["status"]
-    assert metrics.SCHEDULE_PAUSED.labels(namespace="app", source="nightly")._value.get() == 0
-
-
-def test_unused_source_keeps_trying_until_the_final_backup_succeeds(kube):
-    s = schedule(whenSourceUnused="Skip")
-    kube.pods["app"] = [_app_pod(phase="Succeeded"), _app_pod(pvc="other")]  # finished pod, other volume
-    _tick(s, kube, 17)
-    _finish_requests(kube, phase="Failed")
-    _tick(s, kube, 18)                       # final backup failed: try again, don't pause
-    assert len(requests(kube)) == 2 and s["status"]["phase"] == "Active"
-    _finish_requests(kube)
-    _tick(s, kube, 19)
+    assert _paused() == 1
+    _tick(s, kube, 18, hour=12)                             # between ticks: stays paused, no API calls needed
     assert s["status"]["phase"] == "Paused"
-
-
-def test_old_backup_from_before_the_app_stopped_does_not_pause(kube):
-    """A success from while the app was running is not the final state."""
-    s = schedule(whenSourceUnused="Skip")
-    kube.pods["app"] = [_app_pod()]
-    _tick(s, kube, 17)
-    _finish_requests(kube)
-    kube.pods["app"] = []
-    _tick(s, kube, 18)
-    assert len(requests(kube)) == 2 and s["status"]["phase"] == "Active"
-
-
-def test_default_runs_without_looking_at_pods(kube):
-    s = schedule()
-    kube.pods["app"] = []
-    calls = []
-    kube.list_pods = lambda ns: calls.append(ns) or []
-    _tick(s, kube, 17)
-    assert len(requests(kube)) == 1 and calls == []
-
-
-def _paused_schedule(kube):
-    """A Skip schedule that has paused: ran while used, ran once more unused, then paused."""
-    s = schedule(whenSourceUnused="Skip")
-    kube.pods["app"] = [_app_pod()]
-    _tick(s, kube, 17)
-    _finish_requests(kube)
-    kube.pods["app"] = []
-    _tick(s, kube, 18)
-    _finish_requests(kube)
+    kube.pods["app"] = [_app_pod(phase="Pending")]          # starting again
+    _finish(kube)
     _tick(s, kube, 19)
+    assert len(requests(kube)) == 2 and s["status"]["phase"] == "Active" and _paused() == 0
+
+
+def test_finished_pods_and_other_volumes_dont_count(kube):
+    s = schedule(whenSourceUnused="Skip")
+    kube.pods["app"] = [_app_pod(phase="Succeeded"), _app_pod(pvc="other")]
+    _tick(s, kube, 17)
+    assert requests(kube) == [] and s["status"]["phase"] == "Paused"
+
+
+def test_retry_after_a_lost_status_write_reflects_current_pods(kube):
+    s = schedule(whenSourceUnused="Skip")
+    kube.pods["app"] = []
+    _tick(s, kube, 17)
     assert s["status"]["phase"] == "Paused"
-    return s
-
-
-def test_resume_survives_a_lost_status_write_and_a_later_stop_waits_for_a_new_backup(kube):
-    s = _paused_schedule(kube)
     kube.pods["app"] = [_app_pod()]
-    when = datetime(2026, 11, 20, 3, 1, tzinfo=UTC)
+    when = datetime(2026, 11, 18, 3, 1, tzinfo=UTC)
     scheduling.reconcile_schedule(s, kube, when)            # request created, status write lost
     apply(s, scheduling.reconcile_schedule(s, kube, when))  # retry of the same tick
-    assert s["status"]["phase"] == "Active" and "sourceUnusedSince" not in s["status"]
-    assert len(requests(kube)) == 3
-    _finish_requests(kube)
-    kube.pods["app"] = []                                    # stopped again: needs a new final backup
-    _tick(s, kube, 21)
-    assert len(requests(kube)) == 4 and s["status"]["phase"] == "Active"
-    assert s["status"]["sourceUnusedSince"] == ts(datetime(2026, 11, 21, 3, tzinfo=UTC))
+    assert s["status"]["phase"] == "Active" and len(requests(kube)) == 1 and _paused() == 0
 
 
 def test_switching_back_to_run_clears_pause_between_and_on_ticks(kube):
-    from controller import metrics
-    s = _paused_schedule(kube)
+    s = schedule(whenSourceUnused="Skip")
+    kube.pods["app"] = []
+    _tick(s, kube, 17)
+    assert s["status"]["phase"] == "Paused"
     s["spec"]["whenSourceUnused"] = "Run"
-    apply(s, scheduling.reconcile_schedule(s, kube, datetime(2026, 11, 19, 12, 0, tzinfo=UTC)))  # between ticks
-    assert s["status"]["phase"] == "Active" and "sourceUnusedSince" not in s["status"]
-    assert metrics.SCHEDULE_PAUSED.labels(namespace="app", source="nightly")._value.get() == 0
-    _tick(s, kube, 20)
-    assert len(requests(kube)) == 3 and s["status"]["phase"] == "Active"
+    _tick(s, kube, 17, hour=12)                             # between ticks
+    assert s["status"]["phase"] == "Active" and _paused() == 0
+    _tick(s, kube, 18)
+    assert len(requests(kube)) == 1
 
 
-def test_app_resuming_with_broken_credentials_is_not_reported_paused(kube):
-    from controller import metrics
-    s = _paused_schedule(kube)
+def test_resuming_with_broken_credentials_is_not_reported_paused(kube):
+    s = schedule(whenSourceUnused="Skip")
+    kube.pods["app"] = []
+    _tick(s, kube, 17)
     kube.pods["app"] = [_app_pod()]
     kube.secrets.pop(("app", "creds"))
-    _tick(s, kube, 20)
+    _tick(s, kube, 18)
     assert s["status"]["phase"] == "Active" and s["status"]["lastSkipped"]["reason"] == "CredentialsNotFound"
-    assert metrics.SCHEDULE_PAUSED.labels(namespace="app", source="nightly")._value.get() == 0
+    assert _paused() == 0
+
+
+def test_missed_deadline_still_updates_the_pause_state(kube):
+    s = schedule(whenSourceUnused="Skip")
+    kube.pods["app"] = []
+    _tick(s, kube, 17)
+    assert s["status"]["phase"] == "Paused"
+    kube.pods["app"] = [_app_pod()]                         # app resumed while the operator was down
+    _tick(s, kube, 18, hour=9)                              # 6 h after the 03:00 tick: past the deadline
+    assert s["status"]["phase"] == "Active" and _paused() == 0
+    assert s["status"]["lastSkipped"]["reason"] == "MissedDeadline" and requests(kube) == []
 
 
 def test_paused_check_uses_the_source_namespace(kube):
@@ -398,7 +355,15 @@ def test_paused_check_uses_the_source_namespace(kube):
     s["spec"]["template"]["sourceNamespace"] = "data-ns"
     kube.add_source_pvc("data-ns", "data")
     kube.secrets[("data-ns", "creds")] = {"data": {"RESTIC_PASSWORD": "cHc="}}
-    kube.pods["app"] = []                        # schedule's own namespace: irrelevant
+    kube.pods["app"] = []
     kube.pods["data-ns"] = [_app_pod()]
     _tick(s, kube, 17)
-    assert s["status"]["phase"] == "Active" and "sourceUnusedSince" not in s["status"]
+    assert s["status"]["phase"] == "Active" and len(requests(kube)) == 1
+
+
+def test_default_runs_without_looking_at_pods(kube):
+    s = schedule()
+    calls = []
+    kube.list_pods = lambda ns: calls.append(ns) or []
+    _tick(s, kube, 17)
+    assert len(requests(kube)) == 1 and calls == []

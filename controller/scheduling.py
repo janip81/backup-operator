@@ -131,8 +131,6 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
     phase = "Suspended" if spec.get("suspend") else "Paused" if paused else "Active"
     if status.get("phase") != phase:
         patch["phase"] = phase
-    if not skip_policy and status.get("sourceUnusedSince"):
-        patch["sourceUnusedSince"] = None
     metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(1 if phase == "Paused" else 0)
     upcoming = ts(next_tick(spec, now))
     created = parse_ts(md.get("creationTimestamp")) or now
@@ -146,6 +144,15 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
 
     # A tick is due: decide once, then record lastScheduleTime so it is never re-evaluated.
     patch.update({"lastScheduleTime": ts(tick), "nextScheduleTime": upcoming})
+    # whenSourceUnused: Skip -- decided first on every due tick, before any other early return
+    # (deadline, Forbid, validation, retries), so the phase always reflects the current pod state.
+    if skip_policy:
+        in_use = source_in_use(kube, src_ns, (spec.get("template") or {}).get("sourcePVC") or "")
+        patch["phase"] = "Suspended" if spec.get("suspend") else "Active" if in_use else "Paused"
+        metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(0 if in_use else 1)
+        if not in_use:
+            return {**patch, "lastSkipped": {"time": ts(tick), "reason": "SourceUnused"},
+                    "message": f"Paused at {ts(tick)}: no pod uses the source PVC"}
     deadline = int(spec.get("startingDeadlineSeconds") or cfg.SCHEDULE_STARTING_DEADLINE)
     if (now - tick).total_seconds() > deadline:
         return {**patch, "lastSkipped": {"time": ts(tick), "reason": "MissedDeadline"},
@@ -153,15 +160,6 @@ def reconcile_schedule(body: dict, kube, now: datetime) -> dict | None:
 
     req_name = request_name(name, uid, tick)
     owned = kube.list_crs_ns("backuprequests", ns, f"{SCHEDULE_UID_LABEL}={uid}")
-    # Pause state first, on every due tick and before any other early return: a retry after a lost
-    # status write, a failing validation or an active previous run must not leave a stale Paused.
-    pause = _pause_decision(spec, status, kube, src_ns, owned, tick)
-    if pause is not None:
-        patch.update(pause)
-        metrics.SCHEDULE_PAUSED.labels(namespace=src_ns, source=name).set(1 if pause["phase"] == "Paused" else 0)
-        if pause["phase"] == "Paused" and not kube.get_cr("backuprequests", ns, req_name):
-            return {**patch, "lastSkipped": {"time": ts(tick), "reason": "SourceUnused"},
-                    "message": f"Paused at {ts(tick)}: no pod uses the source PVC and a backup of it exists"}
     if (spec.get("concurrencyPolicy") or "Forbid") == "Forbid":
         active = [r["metadata"]["name"] for r in owned
                   if (r.get("status") or {}).get("phase") not in TERMINAL and r["metadata"]["name"] != req_name]
@@ -196,24 +194,6 @@ def source_in_use(kube, ns: str, pvc: str) -> bool:
             if (vol.get("persistentVolumeClaim") or {}).get("claimName") == pvc:
                 return True
     return False
-
-
-def _pause_decision(spec: dict, status: dict, kube, src_ns: str, owned: list[dict],
-                    tick: datetime) -> dict | None:
-    """whenSourceUnused: Skip. While a pod uses the source: run and forget when it became unused. Once
-    unused: remember the first such tick and keep running until a backup started at or after it has
-    succeeded (the app's final state), then pause. Returns a status patch, or None for whenSourceUnused: Run."""
-    if (spec.get("whenSourceUnused") or "Run") != "Skip":
-        return None
-    pvc = (spec.get("template") or {}).get("sourcePVC") or ""
-    if source_in_use(kube, src_ns, pvc):
-        return {"sourceUnusedSince": None, "phase": "Active"}
-    since = parse_ts(status.get("sourceUnusedSince")) or tick
-    starts = [parse_ts((r.get("status") or {}).get("startedAt")) for r in owned
-              if (r.get("status") or {}).get("phase") == "Succeeded"]
-    newest = max((t for t in starts if t), default=None)
-    paused = newest is not None and newest >= since
-    return {"sourceUnusedSince": ts(since), "phase": "Paused" if paused else "Active"}
 
 
 def _src_ns(spec: dict, ns: str) -> str:
