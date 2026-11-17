@@ -84,29 +84,24 @@ def _touch(kind: str, key) -> None:
     _touched[(kind, key)] = _seq
 
 
-def observe_result(namespace: str, source: str, phase: str, completed_ts: float) -> None:
-    """Track the newest Succeeded/Failed completion per source (idempotent, order-independent)."""
-    gauge = LAST_SUCCESS if phase == "Succeeded" else LAST_FAILURE if phase == "Failed" else None
-    if gauge is None:
-        return
-    key = (namespace, source, phase)
-    with _lock:
-        if completed_ts > _latest.get(key, 0):
-            _latest[key] = completed_ts
-            gauge.labels(namespace=namespace, source=source).set(completed_ts)
-
-
 def record_event(record: str, namespace: str, source: str, phase: str, completed_ts: float | None) -> None:
-    """Track each Backup record (completed_ts None = deleted). Deleting records lowers or removes the
-    source's last success/failure, so sources whose history was deleted disappear from the metrics."""
+    """Track each Backup record (completed_ts None = deleted); the only writer of last success/failure.
+    Deleting records, or a record moving to an older time or another phase, lowers or removes the source.
+    Inventory and gauges change under one lock, so a concurrent delete can't be undone."""
+    new = (namespace, source, phase, completed_ts) \
+        if completed_ts is not None and phase in ("Succeeded", "Failed") else None
     with _lock:
         old = _records.pop(record, None)
-        if completed_ts is not None and phase in ("Succeeded", "Failed"):
-            _records[record] = (namespace, source, phase, completed_ts)
-        if old and old[:3] != (namespace, source, phase) or (old and completed_ts is None):
-            _recompute_latest(*old[:3])
-    if completed_ts is not None:
-        observe_result(namespace, source, phase, completed_ts)
+        if new:
+            _records[record] = new
+        for key in {k[:3] for k in (old, new) if k}:
+            if new and key == new[:3] and (old is None or old[:3] != key or new[3] >= old[3]):
+                if new[3] > _latest.get(key, 0):  # only raises: no scan needed
+                    _latest[key] = new[3]
+                    (LAST_SUCCESS if key[2] == "Succeeded" else LAST_FAILURE).labels(
+                        namespace=key[0], source=key[1]).set(new[3])
+            else:
+                _recompute_latest(*key)
 
 
 def _recompute_latest(namespace: str, source: str, phase: str) -> None:

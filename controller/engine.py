@@ -414,7 +414,7 @@ def step_recording(req: Req, kube, admission: Admission, now: datetime) -> dict 
         if started and phase == "Succeeded":
             metrics.DURATION.labels(namespace=req.src_ns, source=req.source).observe(
                 (completed - started).total_seconds())
-        metrics.observe_result(req.src_ns, req.source, phase, completed.timestamp())
+        # last success/failure come from the Backup record's watch event (metrics.record_event)
         if phase == "Succeeded":
             _sync_records_with_retention(req, kube, name, stored)
         patch = {"phase": "CleaningUp", "phaseStartedAt": ts(now)}

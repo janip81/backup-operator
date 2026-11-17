@@ -94,7 +94,8 @@ def request_event(event, body, **_):
     spec = body.get("spec") or {}
     if f["phase"] != "Legacy" and event.get("type") != "DELETED":
         labels = body["metadata"].get("labels") or {}
-        src_ns = spec.get("sourceNamespace") or body["metadata"]["namespace"]
+        src_ns = (body.get("status") or {}).get("sourceNamespace") or spec.get("sourceNamespace") \
+            or body["metadata"]["namespace"]  # same order as engine.Req.src_ns
         metrics.init_source(src_ns, labels.get(f"{cfg.GROUP}/schedule") or spec.get("sourcePVC", ""),
                             spec.get("sourcePVC"))
 
